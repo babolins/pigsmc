@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.python-version
+
+# pybind11 / Cython / CFFI compiled extensions
+*.so
+*.pyd
+
+# Virtual environments
+.venv
+
+# Visual Studio Code
+*.code-workspace
+
+# Borrowed skills
+grill-me/
+improve-codebase-architecture/
+prd-to-issues/
+tdd/
+write-a-prd/
