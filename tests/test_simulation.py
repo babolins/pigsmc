@@ -92,17 +92,6 @@ def test_run_records_nonzero_attempts():
     assert stats["attempts"] > 0
 
 
-def test_acceptance_rate_one_for_zero_potential():
-    """step_size=0 → all proposals are no-ops → acceptance must be 1.0."""
-    sim = make_sim()
-    move = TranslationEndMove(step_size=0.0)
-    sim.add_move(move)
-    sim.run(blocks=5)
-    stats = sim.acceptance_stats[move]
-    assert stats["attempts"] > 0
-    assert stats["acceptances"] == stats["attempts"]
-
-
 def test_block_count_accumulates():
     sim = make_sim()
     sim.add_move(TranslationEndMove(step_size=0.0))

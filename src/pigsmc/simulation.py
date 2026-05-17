@@ -60,6 +60,9 @@ class Simulation:
         self._moves: list[Move] = []
         self._move_weights: list[float] = []
         self._acceptance_data: dict[int, dict] = {}  # id(move) → stats
+        self._bead_acceptance_data: dict[int, dict] = {  # bead index → stats
+            m: {"attempts": 0, "acceptances": 0} for m in range(M)
+        }
 
         self._observables: dict[int, dict] = {}
         self._next_obs_id = 0
@@ -112,6 +115,10 @@ class Simulation:
         return {move: self._acceptance_data[id(move)] for move in self._moves}
 
     @property
+    def bead_acceptance_stats(self) -> dict[int, dict]:
+        return dict(self._bead_acceptance_data)
+
+    @property
     def block_count(self) -> int:
         return self._block_count
 
@@ -154,11 +161,16 @@ class Simulation:
                 result = move.propose(path_state, self._rng)
                 log_a = self._log_acceptance(result)
 
-                accepted = log_a >= 0.0 or float(self._rng.random()) < np.exp(log_a)
+                accepted = log_a >= 0.0 or np.log(float(self._rng.random())) < log_a
 
                 self._acceptance_data[id(move)]["attempts"] += 1
+                changed_beads = {m for (_, m) in result.changed}
+                for m in changed_beads:
+                    self._bead_acceptance_data[m]["attempts"] += 1
                 if accepted:
                     self._acceptance_data[id(move)]["acceptances"] += 1
+                    for m in changed_beads:
+                        self._bead_acceptance_data[m]["acceptances"] += 1
                     for (i, m) in result.changed:
                         self.positions[m, i, :] = self._buf_pos[m, 0, :]
 

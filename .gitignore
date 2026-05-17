@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 .python-version
+.pytest_cache/
 
 # pybind11 / Cython / CFFI compiled extensions
 *.so
