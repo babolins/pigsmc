@@ -3,8 +3,9 @@ from __future__ import annotations
 import numpy as np
 
 from .boundaries import Boundary
-from .moves import Move, MoveResult, PathState, SliceKind
+from .moves import Move, SliceKind
 from .particles import ParticleType
+from pigsmc._engine import Engine
 
 
 class Simulation:
@@ -52,15 +53,18 @@ class Simulation:
         )
         self._slice_kind = np.full(M, SliceKind.PHYSICAL, dtype=np.int32)
 
-        self._V_ext = None
-        self._V_int = None
-        self._f = None
-        self._h = None
+        self._engine = Engine(
+            self.positions, self.orientations,
+            self._buf_pos, self._buf_ori,
+            self._lambda_trans, self._slice_kind,
+            self._N, self._M, self._tau_prime,
+            self._rng,
+        )
 
         self._moves: list[Move] = []
         self._move_weights: list[float] = []
-        self._acceptance_data: dict[int, dict] = {}  # id(move) → stats
-        self._bead_acceptance_data: dict[int, dict] = {  # bead index → stats
+        self._acceptance_data: dict[int, dict] = {}
+        self._bead_acceptance_data: dict[int, dict] = {
             m: {"attempts": 0, "acceptances": 0} for m in range(M)
         }
 
@@ -73,12 +77,16 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def set_potential(self, V_ext, V_int) -> None:
-        self._V_ext = V_ext
-        self._V_int = V_int
+        self._engine.set_potential(
+            V_ext if V_ext is not None else None,
+            V_int if V_int is not None else None,
+        )
 
     def set_trial_wavefunction(self, f=None, h=None) -> None:
-        self._f = f
-        self._h = h
+        self._engine.set_trial_wavefunction(
+            f if f is not None else None,
+            h if h is not None else None,
+        )
 
     # ------------------------------------------------------------------
     # Move registration
@@ -88,6 +96,7 @@ class Simulation:
         self._moves.append(move)
         self._move_weights.append(weight)
         self._acceptance_data[id(move)] = {"attempts": 0, "acceptances": 0}
+        self._engine.add_move(move, weight)
 
     # ------------------------------------------------------------------
     # Observable registration
@@ -130,49 +139,18 @@ class Simulation:
         if not self._moves:
             raise ValueError("No moves registered; call add_move() first")
 
-        total_w = sum(self._move_weights)
-        probs = [w / total_w for w in self._move_weights]
-
-        pos_view = self.positions.view()
-        pos_view.flags.writeable = False
-        ori_view = self.orientations.view()
-        ori_view.flags.writeable = False
-
-        path_state = PathState(
-            positions=pos_view,
-            orientations=ori_view,
-            buffer_positions=self._buf_pos,
-            buffer_orientations=self._buf_ori,
-            N=self._N,
-            M=self._M,
-            tau_prime=self._tau_prime,
-            lambda_trans=self._lambda_trans,
-            slice_kind=self._slice_kind,
-        )
-
-        attempts_per_block = self._sweeps_per_block * self._N * self._M
-        n_moves = len(self._moves)
-
         for _ in range(blocks):
-            for _ in range(attempts_per_block):
-                idx = int(self._rng.choice(n_moves, p=probs))
-                move = self._moves[idx]
+            move_stats, bead_stats = self._engine.run_sweep(self._sweeps_per_block)
 
-                result = move.propose(path_state, self._rng)
-                log_a = self._log_acceptance(result)
+            for idx, move in enumerate(self._moves):
+                attempts, acceptances = move_stats[idx]
+                self._acceptance_data[id(move)]["attempts"] += attempts
+                self._acceptance_data[id(move)]["acceptances"] += acceptances
 
-                accepted = log_a >= 0.0 or np.log(float(self._rng.random())) < log_a
-
-                self._acceptance_data[id(move)]["attempts"] += 1
-                changed_beads = {m for (_, m) in result.changed}
-                for m in changed_beads:
-                    self._bead_acceptance_data[m]["attempts"] += 1
-                if accepted:
-                    self._acceptance_data[id(move)]["acceptances"] += 1
-                    for m in changed_beads:
-                        self._bead_acceptance_data[m]["acceptances"] += 1
-                    for (i, m) in result.changed:
-                        self.positions[m, i, :] = self._buf_pos[m, 0, :]
+            for m in range(self._M):
+                attempts, acceptances = bead_stats[m]
+                self._bead_acceptance_data[m]["attempts"] += attempts
+                self._bead_acceptance_data[m]["acceptances"] += acceptances
 
             self._block_count += 1
             self._fire_observables()
@@ -182,71 +160,3 @@ class Simulation:
         for obs in list(self._observables.values()):
             if b > obs["start_after"] and (b - obs["start_after"]) % obs["every"] == 0:
                 obs["callback"](b, self.positions, self.orientations)
-
-    # ------------------------------------------------------------------
-    # Acceptance ratio (primitive propagator)
-    # ------------------------------------------------------------------
-
-    def _log_acceptance(self, result: MoveResult) -> float:
-        log_a = result.log_ratio_contrib
-
-        for (i, m) in result.changed:
-            r_old = self.positions[m, i, :]
-            r_new = self._buf_pos[m, 0, :]
-            lam = self._lambda_trans[i]
-            tau = self._tau_prime
-
-            # Kinetic terms from the free propagator
-            if m > 0:
-                r_prev = self.positions[m - 1, i, :]
-                d_old = r_old - r_prev
-                d_new = r_new - r_prev
-                log_a += (np.dot(d_old, d_old) - np.dot(d_new, d_new)) / (4.0 * lam * tau)
-            if m < self._M - 1:
-                r_next = self.positions[m + 1, i, :]
-                d_old = r_old - r_next
-                d_new = r_new - r_next
-                log_a += (np.dot(d_old, d_old) - np.dot(d_new, d_new)) / (4.0 * lam * tau)
-
-            # Potential terms
-            if self._V_ext is not None or self._V_int is not None:
-                factor = 0.5 if (m == 0 or m == self._M - 1) else 1.0
-                u_i = self.orientations[m, i, :]
-                V_old = V_new = 0.0
-
-                if self._V_ext is not None:
-                    V_old += float(self._V_ext(r_old, u_i))
-                    V_new += float(self._V_ext(r_new, u_i))
-
-                if self._V_int is not None:
-                    for j in range(self._N):
-                        if j != i:
-                            r_j = self.positions[m, j, :]
-                            u_j = self.orientations[m, j, :]
-                            V_old += float(self._V_int(r_old - r_j, u_i, u_j))
-                            V_new += float(self._V_int(r_new - r_j, u_i, u_j))
-
-                log_a -= tau * factor * (V_new - V_old)
-
-            # Trial wavefunction terms (endpoint slices only)
-            if (m == 0 or m == self._M - 1) and (
-                self._f is not None or self._h is not None
-            ):
-                u_i = self.orientations[m, i, :]
-                psi_old = psi_new = 0.0
-
-                if self._f is not None:
-                    psi_old += float(self._f(r_old, u_i))
-                    psi_new += float(self._f(r_new, u_i))
-
-                if self._h is not None:
-                    for j in range(self._N):
-                        if j != i:
-                            r_j = self.positions[m, j, :]
-                            u_j = self.orientations[m, j, :]
-                            psi_old += float(self._h(r_old - r_j, u_i, u_j))
-                            psi_new += float(self._h(r_new - r_j, u_i, u_j))
-
-                log_a += psi_new - psi_old
-
-        return float(log_a)
