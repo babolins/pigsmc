@@ -22,7 +22,7 @@ Add support for the fourth-order Chin 4A and Chin 4B short-time propagator appro
 **Potential routing:**
 - Engine calls `V_ext(r_i, u_i, compute_grad=False)` and `V_int(r_ij, u_i, u_j, compute_grad=False)` for P-slices (as before)
 - Engine calls `V_ext(r_i, u_i, compute_grad=True)` and `V_int(r_ij, u_i, u_j, compute_grad=True)` for I-slices to obtain `(value, grad_pos, grad_ori)`
-- Engine computes `W = Σ_i [λ_trans_i |∇_{r_i} V|² + λ_rot_i |û_i × ∇_{û_i} V|²]` at I-slices
+- Engine computes `W = Σ_i [λ_trans_i |∇_{r_i} V|² + λ_rot_i |û_i × ∇_{û_i} V|²]` at I-slices, where `λ_trans_i` and `λ_rot_i` are taken directly from `ParticleType.lambda_trans` and `.lambda_rot` (both are defined as ℏτ/(2m) and ℏτ/(2I) respectively, so they already include τ)
 - Engine evaluates `Ṽ = V + 2u₀τ'W` at I-slices for use in the acceptance ratio
 - If `compute_grad=True` is called but the user's potential does not return gradients (returns a scalar), a clear `RuntimeError` is raised at first use
 

@@ -11,7 +11,7 @@ Add support for rotational degrees of freedom (linear rigid rotors). This slice 
 **Scope:**
 
 **ParticleType and validation:**
-- `lambda_rot: float | None` activated in `ParticleType`; `None` means no rotational DOF
+- `lambda_rot: float | None` activated in `ParticleType`; `None` means no rotational DOF. `lambda_rot` is defined as λ_rot = ℏτ/(2I), where I is the moment of inertia and τ is the imaginary time step — it already incorporates τ and is used bare (not multiplied by τ') in propagator exponents.
 - `Simulation` validates: if any particle has `lambda_rot` set, all particles must have `lambda_rot` set (mixed pure-translational and rotational particles deferred; for now all-or-nothing)
 - Orientation arrays `positions`-paired `orientations` (M, N, 3) are now live; initialized as unit vectors by the user (library does not set initial conditions)
 

@@ -98,7 +98,7 @@ Encapsulates propagator-specific logic: acceptance ratio contributions for primi
 `Boundary` enum with four values. MIC function selected at construction and dispatched via C++ function pointer in the engine. Applies PBC to compute `r_ij` before passing to user potential and trial wavefunction functions.
 
 **`pigsmc.particles` — `ParticleType`**
-A simple dataclass: `lambda_trans: float | None`, `lambda_rot: float | None`. Used at construction to configure per-particle kinetic scales in the engine.
+A simple dataclass: `lambda_trans: float | None`, `lambda_rot: float | None`. Used at construction to configure per-particle kinetic scales in the engine. `lambda_trans` is defined as λ_trans = ℏτ/(2m) and `lambda_rot` is defined as λ_rot = ℏτ/(2I), where m is the particle mass, I is its moment of inertia, and τ is the imaginary time step. These values already incorporate the time step and are used directly as the Gaussian width in free-propagator exponents (denominator 4λ, not 4λτ').
 
 **`pigsmc.physics` — `compile_physics`**
 Runtime C++ compilation using setuptools Extension machinery. Discovers the library's installed include paths and compiled objects. Produces a pybind11 extension module in `cache_dir`, keyed by source hashes. Provides C++ registration macros (via a library header) so users can expose functions without boilerplate.
@@ -170,7 +170,7 @@ Save and load logic using h5py. HDF5 layout: `/coords/positions`, `/coords/orien
 
 ## Further Notes
 
-- The `λ_trans` and `λ_rot` parameters in `ParticleType` are treated as independent inputs. Their physical interpretation is left to the user. This allows the user to work in any consistent unit system.
+- The `λ_trans` and `λ_rot` parameters in `ParticleType` are defined as λ_trans = ℏτ/(2m) and λ_rot = ℏτ/(2I) respectively, where τ is the imaginary time step. These values already incorporate τ, so they appear bare (not multiplied by τ') in free-propagator exponent denominators. The user is responsible for computing them consistently with their chosen unit system and time step. This is distinct from supplying a mass or moment of inertia alone — the time-step dependence is the user's responsibility.
 - The time step is supplied as `τ' = τ/ℏ` (i.e. ℏ=1 convention). Physical interpretation is the user's responsibility.
 - The observable callback receives the full path (all M slices), not just the center slice, to support local energy estimators (requiring endpoint slices), virial estimators, and potential future off-diagonal estimators requiring adjacent slices.
 - `compile_physics` is intended for production use after prototyping; Python implementations of potentials and moves are fully supported throughout and carry no correctness penalty, only performance overhead relative to compiled C++.

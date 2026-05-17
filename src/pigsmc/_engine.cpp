@@ -305,7 +305,7 @@ private:
                     d_old += ro * ro;
                     d_new += rn * rn;
                 }
-                log_a += (d_old - d_new) / (4.0 * lam_i * tau_);
+                log_a += (d_old - d_new) / (4.0 * lam_i);
             }
             if (m < M_ - 1) {
                 double d_old = 0.0, d_new = 0.0;
@@ -316,7 +316,7 @@ private:
                     d_old += ro * ro;
                     d_new += rn * rn;
                 }
-                log_a += (d_old - d_new) / (4.0 * lam_i * tau_);
+                log_a += (d_old - d_new) / (4.0 * lam_i);
             }
 
             // Potential terms
