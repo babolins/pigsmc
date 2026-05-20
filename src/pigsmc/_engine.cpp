@@ -151,6 +151,38 @@ public:
     }
 };
 
+class TranslationRigidMove : public Move {
+public:
+    explicit TranslationRigidMove(double step_size) : step_size_(step_size) {}
+
+    MoveResult propose(PathState& state, py::object rng) override {
+        int i = rng.attr("integers")(0, state.N).cast<int>();
+        auto disp = rng.attr("uniform")(
+            py::float_(-step_size_), py::float_(step_size_), py::int_(3)
+        ).cast<Array3d>().unchecked<1>();
+
+        auto pos = state.positions.unchecked<3>();
+        auto buf = state.buffer_positions.mutable_unchecked<3>();
+        for (int m = 0; m < state.M; m++) {
+            buf(m, 0, 0) = pos(m, i, 0) + disp(0);
+            buf(m, 0, 1) = pos(m, i, 1) + disp(1);
+            buf(m, 0, 2) = pos(m, i, 2) + disp(2);
+        }
+        return MoveResult(i, 0, state.M - 1, 0.0);
+    }
+
+private:
+    double step_size_;
+};
+
+class PyTranslationRigidMove : public TranslationRigidMove {
+public:
+    using TranslationRigidMove::TranslationRigidMove;
+    MoveResult propose(PathState& state, py::object rng) override {
+        PYBIND11_OVERRIDE(MoveResult, TranslationRigidMove, propose, state, rng);
+    }
+};
+
 // ============================================================
 // Engine: owns the sweep loop
 // ============================================================
@@ -416,6 +448,11 @@ PYBIND11_MODULE(_engine, m) {
                std::shared_ptr<TranslationInteriorMove>>(m, "TranslationInteriorMove")
         .def(py::init<double>(), py::arg("step_size"))
         .def("propose", &TranslationInteriorMove::propose);
+
+    py::class_<TranslationRigidMove, Move, PyTranslationRigidMove,
+               std::shared_ptr<TranslationRigidMove>>(m, "TranslationRigidMove")
+        .def(py::init<double>(), py::arg("step_size"))
+        .def("propose", &TranslationRigidMove::propose);
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<Array3d, Array3d, Array3d, Array3d,

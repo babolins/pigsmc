@@ -8,6 +8,7 @@ from pigsmc._engine import (
     PathState,
     TranslationEndMove,
     TranslationInteriorMove,
+    TranslationRigidMove,
 )
 
 
@@ -23,4 +24,5 @@ __all__ = [
     "SliceKind",
     "TranslationEndMove",
     "TranslationInteriorMove",
+    "TranslationRigidMove",
 ]

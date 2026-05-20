@@ -17,7 +17,7 @@ The move is slice-type-agnostic: it operates on contiguous slices using the elem
 - Validates at first use (or at `sim.run()` call): `2^level ≤ M - 1`
 - Per attempt: select a random particle `i`; select a random starting slice `m_start` such that the range `[m_start, m_start + 2^level]` fits within `[0, M-1]`; use the Lévy bridge to propose new positions for the `2^level - 1` interior slices of the range, conditioning on the fixed endpoint slices `m_start` and `m_start + 2^level`
 - Lévy bridge proposal: for translational DOF, the midpoint of any sub-interval is Gaussian with mean equal to the linear interpolation of the two sub-interval endpoints and variance `t_eff × lambda_trans` where `t_eff` is the number of elementary steps to each endpoint
-- `MoveResult.changed` contains the `(i, m)` pairs for all interior slices of the range (endpoints are fixed)
+- `MoveResult.particle = i`, `MoveResult.m_lo = m_start + 1`, `MoveResult.m_hi = m_start + 2^level - 1` (the interior slices of the range form one consecutive range; the fixed endpoint slices are excluded)
 - `MoveResult.log_ratio_contrib` contains the log of the Lévy bridge proposal ratio (the kinematic contribution the move owns — cancels the free-propagator kinetic terms in the acceptance ratio)
 - When `issues/004` is merged: Lévy bridge mean respects PBC (interpolation takes the minimum-image path between endpoints)
 
@@ -27,7 +27,7 @@ The move is slice-type-agnostic: it operates on contiguous slices using the elem
 
 - [ ] `TranslationBisectionMove(level=1)` is importable and registerable
 - [ ] For a zero-potential free-particle system, acceptance rate is 1.0 regardless of `step_size` (bisection proposal exactly satisfies detailed balance for the kinetic term alone)
-- [ ] `MoveResult.changed` contains exactly `2^level - 1` entries (interior slices only)
+- [ ] `MoveResult.m_hi - MoveResult.m_lo + 1 == 2^level - 1` (exactly the interior slices of the range)
 - [ ] Attempting to use a `level` where `2^level > M - 1` raises a clear error at `sim.run()` time or earlier
 - [ ] `acceptance_stats` tracks `TranslationBisectionMove` attempts and acceptances separately
 - [ ] All prior tests pass

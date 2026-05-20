@@ -12,7 +12,7 @@ Add `TranslationRigidMove`: a move that displaces all M slices of a single rando
 
 - `TranslationRigidMove(step_size: float)` C++ `Move` subclass
 - Per attempt: select a random particle `i`; draw a uniform displacement vector from `[-step_size, step_size]³`; shift `positions[m, i, :]` by that vector for all M slices simultaneously
-- `MoveResult.changed` contains all `(i, m)` pairs for the moved particle across all slices
+- `MoveResult.particle = i`, `MoveResult.m_lo = 0`, `MoveResult.m_hi = M - 1` (all slices for the selected particle form one consecutive range)
 - `MoveResult.log_ratio_contrib = 0.0` (proposal is symmetric)
 - When `issues/004` is merged: proposed positions are wrapped into the box for periodic dimensions after acceptance
 - Acceptance ratio computed by the engine as usual: sum of potential changes across all affected slices plus trial wavefunction change at endpoints

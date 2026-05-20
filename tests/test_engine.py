@@ -9,6 +9,7 @@ from pigsmc import (
     Simulation,
     TranslationEndMove,
     TranslationInteriorMove,
+    TranslationRigidMove,
 )
 
 
@@ -187,3 +188,58 @@ def test_cpp_engine_faster_than_python_baseline():
     # The real speedup is measured relative to the old Python loop, but we
     # just verify it finishes in reasonable time.
     assert dt_cpp < 60.0, f"C++ engine took {dt_cpp:.1f}s for {blocks} blocks"
+
+
+# ---------------------------------------------------------------------------
+# TranslationRigidMove
+# ---------------------------------------------------------------------------
+
+def test_rigid_move_importable_and_registerable():
+    sim = make_sim(N=1, M=5)
+    move = TranslationRigidMove(step_size=0.5)
+    sim.add_move(move)
+    assert move in sim.acceptance_stats
+
+
+def test_rigid_move_same_displacement_all_slices():
+    """All M slices of the selected particle shift by the same vector."""
+    sim = make_sim(N=1, M=5, seed=7)
+    # Start with distinct per-slice positions so the rigid shift is visible
+    for m in range(5):
+        sim.positions[m, 0, :] = [float(m), 0.0, 0.0]
+    initial_offsets = sim.positions[:, 0, :] - sim.positions[0, 0, :]  # (5,3)
+
+    move = TranslationRigidMove(step_size=0.5)
+    sim.add_move(move)
+    sim.run(blocks=20)
+
+    # Relative offsets between slices must be unchanged after rigid moves
+    final_offsets = sim.positions[:, 0, :] - sim.positions[0, 0, :]
+    np.testing.assert_allclose(final_offsets, initial_offsets, atol=1e-12)
+
+
+def test_rigid_move_acceptance_rate_one_with_zero_potential():
+    """Kinetic terms cancel for rigid moves → acceptance rate 1.0 with no potential."""
+    sim = make_sim(N=2, M=5, seed=13)
+    move = TranslationRigidMove(step_size=1.0)
+    sim.add_move(move)
+    sim.run(blocks=10)
+    stats = sim.acceptance_stats[move]
+    assert stats["attempts"] > 0
+    assert stats["acceptances"] == stats["attempts"]
+
+
+def test_rigid_move_stats_independent_of_other_moves():
+    """Rigid move stats are tracked separately from end/interior moves."""
+    sim = make_sim(N=1, M=5, seed=0)
+    end_move = TranslationEndMove(step_size=0.1)
+    rigid_move = TranslationRigidMove(step_size=0.5)
+    sim.add_move(end_move, weight=1.0)
+    sim.add_move(rigid_move, weight=1.0)
+    sim.run(blocks=5)
+
+    end_stats = sim.acceptance_stats[end_move]
+    rigid_stats = sim.acceptance_stats[rigid_move]
+    assert end_stats["attempts"] + rigid_stats["attempts"] > 0
+    assert rigid_stats["acceptances"] == rigid_stats["attempts"]
+    assert end_stats is not rigid_stats
