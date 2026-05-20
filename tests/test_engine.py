@@ -44,7 +44,7 @@ class CustomMove(Move):
         m = 0  # always propose at slice 0
         disp = rng.uniform(-self.step_size, self.step_size, size=3)
         path_state.buffer_positions[m, 0, :] = path_state.positions[m, i, :] + disp
-        return MoveResult(changed=[(i, m)], log_ratio_contrib=0.0)
+        return MoveResult(particle=i, m_lo=m, m_hi=m, log_ratio_contrib=0.0)
 
 
 def test_python_move_trampoline_called():
