@@ -2,9 +2,9 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -18,12 +18,13 @@ using Array1i = py::array_t<int32_t>;
 // MoveResult
 // ============================================================
 struct MoveResult {
-    std::vector<std::pair<int, int>> changed;  // (particle, slice)
-    double log_ratio_contrib;
+    int particle{0};
+    int m_lo{0}, m_hi{0};  // inclusive range of changed slices
+    double log_ratio_contrib{0.0};
 
-    MoveResult() : log_ratio_contrib(0.0) {}
-    MoveResult(std::vector<std::pair<int, int>> c, double lrc)
-        : changed(std::move(c)), log_ratio_contrib(lrc) {}
+    MoveResult() = default;
+    MoveResult(int particle, int m_lo, int m_hi, double lrc)
+        : particle(particle), m_lo(m_lo), m_hi(m_hi), log_ratio_contrib(lrc) {}
 };
 
 // ============================================================
@@ -102,7 +103,7 @@ public:
         buf(m, 0, 1) = pos(m, i, 1) + disp(1);
         buf(m, 0, 2) = pos(m, i, 2) + disp(2);
 
-        return MoveResult({{i, m}}, 0.0);
+        return MoveResult(i, m, m, 0.0);
     }
 
 private:
@@ -135,7 +136,7 @@ public:
         buf(m, 0, 1) = pos(m, i, 1) + disp(1);
         buf(m, 0, 2) = pos(m, i, 2) + disp(2);
 
-        return MoveResult({{i, m}}, 0.0);
+        return MoveResult(i, m, m, 0.0);
     }
 
 private:
@@ -240,15 +241,13 @@ public:
             }
 
             delta_move[idx].attempts++;
-
-            // Collect unique beads
-            std::set<int> beads;
-            for (auto& [pi, pm] : result.changed) beads.insert(pm);
-            for (int mb : beads) delta_bead[mb].attempts++;
+            for (int mb = result.m_lo; mb <= result.m_hi; mb++)
+                delta_bead[mb].attempts++;
 
             if (accepted) {
                 delta_move[idx].acceptances++;
-                for (int mb : beads) delta_bead[mb].acceptances++;
+                for (int mb = result.m_lo; mb <= result.m_hi; mb++)
+                    delta_bead[mb].acceptances++;
                 apply_move(result);
             }
         }
@@ -278,7 +277,8 @@ private:
     void apply_move(const MoveResult& result) {
         auto pos = pos_.mutable_unchecked<3>();
         auto buf = buf_pos_.unchecked<3>();
-        for (auto& [i, m] : result.changed) {
+        int i = result.particle;
+        for (int m = result.m_lo; m <= result.m_hi; m++) {
             pos(m, i, 0) = buf(m, 0, 0);
             pos(m, i, 1) = buf(m, 0, 1);
             pos(m, i, 2) = buf(m, 0, 2);
@@ -292,34 +292,35 @@ private:
         auto buf = buf_pos_.unchecked<3>();
         auto lam = lam_.unchecked<1>();
 
-        for (auto& [i, m] : result.changed) {
-            double lam_i = lam(i);
+        int i    = result.particle;
+        int m_lo = result.m_lo;
+        int m_hi = result.m_hi;
+        double lam_i = lam(i);
 
-            // Free-propagator kinetic terms
-            if (m > 0) {
-                double d_old = 0.0, d_new = 0.0;
-                for (int d = 0; d < 3; d++) {
-                    double rp = pos(m - 1, i, d);
-                    double ro = pos(m, i, d) - rp;
-                    double rn = buf(m, 0, d) - rp;
-                    d_old += ro * ro;
-                    d_new += rn * rn;
-                }
-                log_a += (d_old - d_new) / (4.0 * lam_i);
+        // --- Kinetic terms ---
+        // Each link ml--(ml+1) is visited exactly once.  Links touching the
+        // changed range run from max(0, m_lo-1) to min(M_-2, m_hi).
+        // Old positions always come from pos; new positions come from buf
+        // for endpoints inside [m_lo, m_hi] and from pos for boundary
+        // neighbors outside the changed range.
+        int link_lo = std::max(0,      m_lo - 1);
+        int link_hi = std::min(M_ - 2, m_hi);
+        for (int ml = link_lo; ml <= link_hi; ml++) {
+            int mr = ml + 1;
+            double d_old = 0.0, d_new = 0.0;
+            for (int d = 0; d < 3; d++) {
+                double diff_old = pos(ml, i, d) - pos(mr, i, d);
+                d_old += diff_old * diff_old;
+                double rn_l = (ml >= m_lo) ? buf(ml, 0, d) : pos(ml, i, d);
+                double rn_r = (mr <= m_hi) ? buf(mr, 0, d) : pos(mr, i, d);
+                double diff_new = rn_l - rn_r;
+                d_new += diff_new * diff_new;
             }
-            if (m < M_ - 1) {
-                double d_old = 0.0, d_new = 0.0;
-                for (int d = 0; d < 3; d++) {
-                    double rp = pos(m + 1, i, d);
-                    double ro = pos(m, i, d) - rp;
-                    double rn = buf(m, 0, d) - rp;
-                    d_old += ro * ro;
-                    d_new += rn * rn;
-                }
-                log_a += (d_old - d_new) / (4.0 * lam_i);
-            }
+            log_a += (d_old - d_new) / (4.0 * lam_i);
+        }
 
-            // Potential terms
+        // --- Potential and trial-wavefunction terms (per bead) ---
+        for (int m = m_lo; m <= m_hi; m++) {
             if (!V_ext_.is_none() || !V_int_.is_none()) {
                 double factor = (m == 0 || m == M_ - 1) ? 0.5 : 1.0;
                 auto r_old = row_view(pos_, m, i);
@@ -382,9 +383,12 @@ PYBIND11_MODULE(_engine, m) {
     m.doc() = "pigsmc C++ sweep engine";
 
     py::class_<MoveResult>(m, "MoveResult")
-        .def(py::init<std::vector<std::pair<int, int>>, double>(),
-             py::arg("changed"), py::arg("log_ratio_contrib"))
-        .def_readwrite("changed", &MoveResult::changed)
+        .def(py::init<int, int, int, double>(),
+             py::arg("particle"), py::arg("m_lo"), py::arg("m_hi"),
+             py::arg("log_ratio_contrib"))
+        .def_readwrite("particle", &MoveResult::particle)
+        .def_readwrite("m_lo", &MoveResult::m_lo)
+        .def_readwrite("m_hi", &MoveResult::m_hi)
         .def_readwrite("log_ratio_contrib", &MoveResult::log_ratio_contrib);
 
     py::class_<PathState>(m, "PathState")
