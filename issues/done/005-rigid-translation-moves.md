@@ -24,7 +24,7 @@ Add `TranslationRigidMove`: a move that displaces all M slices of a single rando
 - [ ] `TranslationRigidMove` is importable and registerable via `sim.add_move()`
 - [ ] After a run with only `TranslationRigidMove` and a zero potential, `positions[:, i, :]` for any particle `i` shows the same displacement applied to all slices (rigid shift verified in a test)
 - [ ] `acceptance_stats` tracks attempts and acceptances for `TranslationRigidMove` separately from other move types
-- [ ] Acceptance rate is 1.0 for a zero-potential system
+- [ ] Acceptance rate is 1.0 for a zero-potential system with no trial wavefunction set (kinetic links are unchanged because all slices shift by the same vector, but endpoint wavefunction terms would be non-zero with a non-trivial trial wavefunction)
 - [ ] All prior tests pass
 
 ## Blocked by
