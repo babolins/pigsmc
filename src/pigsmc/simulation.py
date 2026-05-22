@@ -15,11 +15,14 @@ class Simulation:
         M: int,
         tau_prime: float,
         propagator: str = "primitive",
-        boundary: Boundary = Boundary.FREE,
+        boundary: Boundary = None,
         rng: str = "mt19937_64",
         seed: int = 0,
         sweeps_per_block: int = 1,
     ):
+        if boundary is None:
+            boundary = Boundary.free()
+
         if M < 3:
             raise ValueError(f"M must be >= 3, got {M}")
         if (M - 1) % 2 != 0:
@@ -53,12 +56,14 @@ class Simulation:
         )
         self._slice_kind = np.full(M, SliceKind.PHYSICAL, dtype=np.int32)
 
+        _box_half = np.asarray(boundary._box_half, dtype=np.float64)
         self._engine = Engine(
             self.positions, self.orientations,
             self._buf_pos, self._buf_ori,
             self._lambda_trans, self._slice_kind,
             self._N, self._M, self._tau_prime,
             self._rng,
+            boundary._kind, _box_half, boundary,
         )
 
         self._moves: list[Move] = []
@@ -118,6 +123,10 @@ class Simulation:
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
+
+    @property
+    def boundary(self) -> Boundary:
+        return self._boundary
 
     @property
     def acceptance_stats(self) -> dict[Move, dict]:

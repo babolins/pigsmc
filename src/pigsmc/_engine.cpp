@@ -28,6 +28,41 @@ struct MoveResult {
 };
 
 // ============================================================
+// MIC function dispatch
+// ============================================================
+using MicFn = void(*)(double*, const double*, const double*, const double*);
+
+static void do_mic_free(double* out, const double* a, const double* b, const double* /*Lhalf*/) {
+    out[0] = a[0] - b[0];
+    out[1] = a[1] - b[1];
+    out[2] = a[2] - b[2];
+}
+
+static inline double _mic1(double d, double Lhalf) {
+    if (d > Lhalf) d -= 2.0 * Lhalf;
+    else if (d < -Lhalf) d += 2.0 * Lhalf;
+    return d;
+}
+
+static void do_mic_3d(double* out, const double* a, const double* b, const double* Lhalf) {
+    out[0] = _mic1(a[0] - b[0], Lhalf[0]);
+    out[1] = _mic1(a[1] - b[1], Lhalf[1]);
+    out[2] = _mic1(a[2] - b[2], Lhalf[2]);
+}
+
+static void do_mic_quasi2d(double* out, const double* a, const double* b, const double* Lhalf) {
+    out[0] = _mic1(a[0] - b[0], Lhalf[0]);
+    out[1] = _mic1(a[1] - b[1], Lhalf[1]);
+    out[2] = a[2] - b[2];
+}
+
+static void do_mic_quasi1d(double* out, const double* a, const double* b, const double* Lhalf) {
+    out[0] = a[0] - b[0];
+    out[1] = a[1] - b[1];
+    out[2] = _mic1(a[2] - b[2], Lhalf[2]);
+}
+
+// ============================================================
 // PathState
 // ============================================================
 struct PathState {
@@ -39,6 +74,7 @@ struct PathState {
     double tau_prime{0.0};
     Array1d lambda_trans;
     Array1i slice_kind;
+    py::object boundary;
 };
 
 // ============================================================
@@ -70,16 +106,6 @@ static Array3d row_view(Array3d& arr, int m, int i) {
                    reinterpret_cast<double*>(ptr), arr);
 }
 
-static Array3d subtract3(Array3d& a, Array3d& b) {
-    auto ra = a.unchecked<1>();
-    auto rb = b.unchecked<1>();
-    Array3d out({3});
-    auto ro = out.mutable_unchecked<1>();
-    ro(0) = ra(0) - rb(0);
-    ro(1) = ra(1) - rb(1);
-    ro(2) = ra(2) - rb(2);
-    return out;
-}
 
 // ============================================================
 // C++ move implementations
@@ -283,14 +309,29 @@ public:
            Array3d buf_pos, Array3d buf_ori,
            Array1d lambda_trans, Array1i slice_kind,
            int N, int M, double tau_prime,
-           py::object rng)
+           py::object rng,
+           int boundary_kind, Array1d box_half,
+           py::object boundary_obj)
         : pos_(positions), ori_(orientations),
           buf_pos_(buf_pos), buf_ori_(buf_ori),
           lam_(lambda_trans), sk_(slice_kind),
           N_(N), M_(M), tau_(tau_prime), rng_(rng),
           V_ext_(py::none()), V_int_(py::none()),
           f_(py::none()), h_(py::none()),
-          total_w_(0.0) {}
+          total_w_(0.0),
+          boundary_obj_(boundary_obj)
+    {
+        switch (boundary_kind) {
+            case 1: mic_fn_ = do_mic_3d;     break;
+            case 2: mic_fn_ = do_mic_quasi2d; break;
+            case 3: mic_fn_ = do_mic_quasi1d; break;
+            default: mic_fn_ = do_mic_free;  break;
+        }
+        auto bh = box_half.unchecked<1>();
+        box_half_[0] = bh(0);
+        box_half_[1] = bh(1);
+        box_half_[2] = bh(2);
+    }
 
     void add_move(std::shared_ptr<Move> move, double weight) {
         moves_.push_back(std::move(move));
@@ -336,6 +377,7 @@ public:
         ps.tau_prime = tau_;
         ps.lambda_trans = lam_;
         ps.slice_kind = sk_;
+        ps.boundary = boundary_obj_;
 
         int n_attempts = sweeps_per_block * N_ * M_;
 
@@ -391,6 +433,24 @@ private:
     std::vector<double> weights_;
     double total_w_;
     std::vector<MoveStats> move_stats_;
+    MicFn mic_fn_{do_mic_free};
+    std::array<double, 3> box_half_{0.0, 0.0, 0.0};
+    py::object boundary_obj_;
+
+    Array3d mic_displacement(const Array3d& a, const Array3d& b) const {
+        auto ra = a.unchecked<1>();
+        auto rb = b.unchecked<1>();
+        double ai[3] = {ra(0), ra(1), ra(2)};
+        double bi[3] = {rb(0), rb(1), rb(2)};
+        double res[3];
+        mic_fn_(res, ai, bi, box_half_.data());
+        Array3d out({3});
+        auto ro = out.mutable_unchecked<1>();
+        ro(0) = res[0];
+        ro(1) = res[1];
+        ro(2) = res[2];
+        return out;
+    }
 
     void apply_move(const MoveResult& result) {
         auto pos = pos_.mutable_unchecked<3>();
@@ -455,8 +515,8 @@ private:
                         if (j == i) continue;
                         auto r_j   = row_view(pos_, m, j);
                         auto u_j   = row_view(ori_, m, j);
-                        auto rij_o = subtract3(r_old, r_j);
-                        auto rij_n = subtract3(r_new, r_j);
+                        auto rij_o = mic_displacement(r_old, r_j);
+                        auto rij_n = mic_displacement(r_new, r_j);
                         V_old += V_int_(rij_o, u_i, u_j).cast<double>();
                         V_new += V_int_(rij_n, u_i, u_j).cast<double>();
                     }
@@ -480,8 +540,8 @@ private:
                         if (j == i) continue;
                         auto r_j   = row_view(pos_, m, j);
                         auto u_j   = row_view(ori_, m, j);
-                        auto rij_o = subtract3(r_old, r_j);
-                        auto rij_n = subtract3(r_new, r_j);
+                        auto rij_o = mic_displacement(r_old, r_j);
+                        auto rij_n = mic_displacement(r_new, r_j);
                         psi_old += h_(rij_o, u_i, u_j).cast<double>();
                         psi_new += h_(rij_n, u_i, u_j).cast<double>();
                     }
@@ -519,7 +579,8 @@ PYBIND11_MODULE(_engine, m) {
         .def_readwrite("M", &PathState::M)
         .def_readwrite("tau_prime", &PathState::tau_prime)
         .def_readwrite("lambda_trans", &PathState::lambda_trans)
-        .def_readwrite("slice_kind", &PathState::slice_kind);
+        .def_readwrite("slice_kind", &PathState::slice_kind)
+        .def_readwrite("boundary", &PathState::boundary);
 
     py::class_<Move, PyMove, std::shared_ptr<Move>>(m, "Move")
         .def(py::init<>())
@@ -548,12 +609,15 @@ PYBIND11_MODULE(_engine, m) {
     py::class_<Engine>(m, "Engine")
         .def(py::init<Array3d, Array3d, Array3d, Array3d,
                       Array1d, Array1i,
-                      int, int, double, py::object>(),
+                      int, int, double, py::object,
+                      int, Array1d, py::object>(),
              py::arg("positions"), py::arg("orientations"),
              py::arg("buf_pos"), py::arg("buf_ori"),
              py::arg("lambda_trans"), py::arg("slice_kind"),
              py::arg("N"), py::arg("M"), py::arg("tau_prime"),
-             py::arg("rng"))
+             py::arg("rng"),
+             py::arg("boundary_kind"), py::arg("box_half"),
+             py::arg("boundary_obj"))
         .def("add_move", &Engine::add_move, py::arg("move"), py::arg("weight"))
         .def("set_potential", &Engine::set_potential,
              py::arg("V_ext"), py::arg("V_int"))
