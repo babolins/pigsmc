@@ -183,6 +183,92 @@ public:
     }
 };
 
+class TranslationBisectionMove : public Move {
+public:
+    explicit TranslationBisectionMove(int level) : level_(level) {
+        if (level < 1)
+            throw std::invalid_argument("TranslationBisectionMove: level must be >= 1");
+    }
+
+    MoveResult propose(PathState& state, py::object rng) override {
+        int n = 1 << level_;  // 2^level
+        if (n > state.M - 1)
+            throw std::runtime_error(
+                "TranslationBisectionMove: 2^level (" + std::to_string(n) +
+                ") > M-1 (" + std::to_string(state.M - 1) + "), level too large for this system");
+
+        int i = rng.attr("integers")(0, state.N).cast<int>();
+        int max_start = state.M - 1 - n;
+        int m_start = rng.attr("integers")(0, max_start + 1).cast<int>();
+
+        auto pos = state.positions.unchecked<3>();
+        auto buf = state.buffer_positions.mutable_unchecked<3>();
+        auto lam = state.lambda_trans.unchecked<1>();
+        double lam_i = lam(i);
+
+        // Work array: old positions for the full range [m_start .. m_start+n]
+        std::vector<std::array<double, 3>> work(n + 1);
+        std::vector<std::array<double, 3>> work_old(n + 1);
+        for (int k = 0; k <= n; k++) {
+            int m = m_start + k;
+            work[k][0] = pos(m, i, 0);
+            work[k][1] = pos(m, i, 1);
+            work[k][2] = pos(m, i, 2);
+            work_old[k] = work[k];
+        }
+
+        // Lévy bridge bisection: coarsest to finest
+        int step = n;
+        for (int l = level_; l >= 1; l--) {
+            int half_step = step / 2;
+            double t_eff = static_cast<double>(half_step) * half_step / step;
+            double sigma = std::sqrt(lam_i * t_eff);
+
+            for (int k = 0; k + step <= n; k += step) {
+                int mid_k = k + half_step;
+                auto z = rng.attr("standard_normal")(3).cast<Array3d>().unchecked<1>();
+                for (int d = 0; d < 3; d++)
+                    work[mid_k][d] = 0.5 * (work[k][d] + work[k + step][d]) + sigma * z(d);
+            }
+            step = half_step;
+        }
+
+        // Write interior slices to buffer
+        for (int k = 1; k < n; k++) {
+            int m = m_start + k;
+            buf(m, 0, 0) = work[k][0];
+            buf(m, 0, 1) = work[k][1];
+            buf(m, 0, 2) = work[k][2];
+        }
+
+        // Compute log_ratio_contrib to cancel engine kinetic terms for free particle
+        double log_ratio = 0.0;
+        for (int k = 0; k < n; k++) {
+            double d_old = 0.0, d_new = 0.0;
+            for (int d = 0; d < 3; d++) {
+                double diff_old = work_old[k][d] - work_old[k + 1][d];
+                d_old += diff_old * diff_old;
+                double diff_new = work[k][d] - work[k + 1][d];
+                d_new += diff_new * diff_new;
+            }
+            log_ratio += (d_new - d_old) / (4.0 * lam_i);
+        }
+
+        return MoveResult(i, m_start + 1, m_start + n - 1, log_ratio);
+    }
+
+private:
+    int level_;
+};
+
+class PyTranslationBisectionMove : public TranslationBisectionMove {
+public:
+    using TranslationBisectionMove::TranslationBisectionMove;
+    MoveResult propose(PathState& state, py::object rng) override {
+        PYBIND11_OVERRIDE(MoveResult, TranslationBisectionMove, propose, state, rng);
+    }
+};
+
 // ============================================================
 // Engine: owns the sweep loop
 // ============================================================
@@ -453,6 +539,11 @@ PYBIND11_MODULE(_engine, m) {
                std::shared_ptr<TranslationRigidMove>>(m, "TranslationRigidMove")
         .def(py::init<double>(), py::arg("step_size"))
         .def("propose", &TranslationRigidMove::propose);
+
+    py::class_<TranslationBisectionMove, Move, PyTranslationBisectionMove,
+               std::shared_ptr<TranslationBisectionMove>>(m, "TranslationBisectionMove")
+        .def(py::init<int>(), py::arg("level"))
+        .def("propose", &TranslationBisectionMove::propose);
 
     py::class_<Engine>(m, "Engine")
         .def(py::init<Array3d, Array3d, Array3d, Array3d,

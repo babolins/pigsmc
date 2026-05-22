@@ -7,6 +7,7 @@ from pigsmc import (
     MoveResult,
     ParticleType,
     Simulation,
+    TranslationBisectionMove,
     TranslationEndMove,
     TranslationInteriorMove,
     TranslationRigidMove,
@@ -243,3 +244,73 @@ def test_rigid_move_stats_independent_of_other_moves():
     assert end_stats["attempts"] + rigid_stats["attempts"] > 0
     assert rigid_stats["acceptances"] == rigid_stats["attempts"]
     assert end_stats is not rigid_stats
+
+
+# ---------------------------------------------------------------------------
+# TranslationBisectionMove
+# ---------------------------------------------------------------------------
+
+def test_bisection_move_importable_and_registerable():
+    sim = make_sim(N=1, M=9)
+    move = TranslationBisectionMove(level=1)
+    sim.add_move(move)
+    assert move in sim.acceptance_stats
+
+
+def test_bisection_move_acceptance_rate_one_with_zero_potential():
+    """Lévy bridge cancels kinetic terms exactly → acceptance 1.0 with no potential."""
+    sim = make_sim(N=1, M=9, seed=17)
+    move = TranslationBisectionMove(level=3)
+    sim.add_move(move)
+    sim.run(blocks=10)
+    stats = sim.acceptance_stats[move]
+    assert stats["attempts"] > 0
+    assert stats["acceptances"] == stats["attempts"]
+
+
+def test_bisection_move_result_slice_range():
+    """MoveResult m_hi - m_lo + 1 == 2^level - 1 (interior slices only)."""
+    level = 2
+    expected_interior = (1 << level) - 1  # 3
+
+    captured = []
+
+    class CaptureBisectionMove(TranslationBisectionMove):
+        def propose(self, path_state, rng):
+            result = super().propose(path_state, rng)
+            captured.append(result)
+            return result
+
+    sim = make_sim(N=1, M=9, seed=5)
+    move = CaptureBisectionMove(level=level)
+    sim.add_move(move)
+    sim.run(blocks=1)
+
+    assert len(captured) > 0
+    for r in captured:
+        assert r.m_hi - r.m_lo + 1 == expected_interior
+
+
+def test_bisection_move_level_too_large_raises():
+    """2^level > M-1 raises RuntimeError at run() time."""
+    sim = make_sim(N=1, M=3, seed=0)  # M-1 = 2, but 2^2 = 4 > 2
+    move = TranslationBisectionMove(level=2)
+    sim.add_move(move)
+    with pytest.raises(RuntimeError, match="level too large"):
+        sim.run(blocks=1)
+
+
+def test_bisection_move_stats_independent_of_other_moves():
+    """Bisection move stats are tracked separately from end moves."""
+    sim = make_sim(N=1, M=9, seed=3)
+    end_move = TranslationEndMove(step_size=0.1)
+    bisection_move = TranslationBisectionMove(level=1)
+    sim.add_move(end_move, weight=1.0)
+    sim.add_move(bisection_move, weight=1.0)
+    sim.run(blocks=5)
+
+    end_stats = sim.acceptance_stats[end_move]
+    bisection_stats = sim.acceptance_stats[bisection_move]
+    assert end_stats["attempts"] + bisection_stats["attempts"] > 0
+    assert bisection_stats["acceptances"] == bisection_stats["attempts"]
+    assert end_stats is not bisection_stats

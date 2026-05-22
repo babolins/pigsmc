@@ -19,7 +19,7 @@ The move is slice-type-agnostic: it operates on contiguous slices using the elem
 - Lévy bridge proposal: for translational DOF, the midpoint of any sub-interval is Gaussian with mean equal to the linear interpolation of the two sub-interval endpoints and variance `t_eff × lambda_trans` where `t_eff` is the number of elementary steps to each endpoint
 - `MoveResult.particle = i`, `MoveResult.m_lo = m_start + 1`, `MoveResult.m_hi = m_start + 2^level - 1` (the interior slices of the range form one consecutive range; the fixed endpoint slices are excluded)
 - `MoveResult.log_ratio_contrib` contains the log of the Lévy bridge proposal ratio (the kinematic contribution the move owns — cancels the free-propagator kinetic terms in the acceptance ratio)
-- When `issues/004` is merged: Lévy bridge mean respects PBC (interpolation takes the minimum-image path between endpoints)
+- When `issues/004` is merged: Lévy bridge mean uses unwrapped endpoint coordinates directly — because positions are stored in unwrapped coordinates, linear interpolation between endpoints is correct without any minimum-image correction to the bridge mean
 
 **QA target (manual):** free particle with M=9, level=3 — verify that the sampled path distribution matches the known free-propagator Gaussian distribution analytically.
 
