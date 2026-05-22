@@ -15,7 +15,7 @@ Add support for orthorhombic periodic boundary conditions. This slice introduces
 - Validation: `box_lengths` must be provided and positive for non-free boundary types
 - C++ MIC function selected at `Simulation` construction via function pointer, dispatched with zero runtime branching in the hot path; `Boundary.FREE` dispatches to a no-op
 - Engine pre-computes `r_ij = r_i - r_j` with MIC applied before every call to `V_int` and `h` (trial wavefunction pair term)
-- Move types wrap proposed positions back into the simulation box (for periodic dimensions) after a proposal is accepted; orientation vectors are never wrapped
+- Positions are stored in **unwrapped coordinates**: particle positions are not constrained to the primary simulation cell and are never wrapped after accepted moves; only pair displacements `r_ij` are MIC-corrected before being passed to user functions
 - `PathState` exposes `boundary`, `box_lengths`, and a `periodic` mask (length-3 bool array) so custom moves can implement PBC-aware proposals if needed
 
 **QA target (manual):** LJ fluid in a periodic box — verify that pair distances are always within `[0, L/2]` for periodic dimensions, and that the simulation energy is stable (no particle escapes the box).
@@ -24,8 +24,8 @@ Add support for orthorhombic periodic boundary conditions. This slice introduces
 
 - [ ] `Boundary.PERIODIC_3D` simulation completes without error
 - [ ] All `r_ij` vectors passed to `V_int` and `h` satisfy `|r_ij[d]| ≤ box_lengths[d]/2` for each periodic dimension `d` — verified in a test with a mock potential that records all `r_ij` values
-- [ ] Accepted moves wrap positions back into the box: `0 ≤ positions[m, i, d] < box_lengths[d]` for periodic dimensions after every `run()` call
-- [ ] `Boundary.FREE` behavior is identical to before this slice (no-op MIC, no wrapping)
+- [ ] Positions are stored in unwrapped coordinates: after accepted moves, `positions[m, i, d]` is NOT constrained to `[0, box_lengths[d])` and may exceed that range for periodic dimensions
+- [ ] `Boundary.FREE` behavior is identical to before this slice (no-op MIC)
 - [ ] `QUASI_2D` wraps x and y but not z; `QUASI_1D` wraps z but not x or y
 - [ ] Constructing a non-FREE `Simulation` without `box_lengths` raises a clear `ValueError`
 - [ ] All tests from `issues/001` and `issues/003` pass

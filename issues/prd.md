@@ -95,7 +95,7 @@ Eight concrete move classes (four translational, four rotational): `EndMove`, `I
 Encapsulates propagator-specific logic: acceptance ratio contributions for primitive, Chin 4A, and Chin 4B. Owns the free rotor propagator grid (initialization via Legendre sum with configurable `L_max`, Fritsch-Carlson monotone cubic interpolation, per-λ_rot caching). Exposes the `slice_kind` pattern for a given propagator and M.
 
 **`pigsmc.boundaries` — Boundary conditions**
-`Boundary` enum with four values. MIC function selected at construction and dispatched via C++ function pointer in the engine. Applies PBC to compute `r_ij` before passing to user potential and trial wavefunction functions.
+`Boundary` enum with four values. MIC function selected at construction and dispatched via C++ function pointer in the engine. Applies PBC to compute `r_ij` before passing to user potential and trial wavefunction functions. Positions are stored in **unwrapped coordinates**: particle positions are not constrained to the primary simulation cell and are never wrapped on acceptance; only pair displacements `r_ij` are MIC-corrected.
 
 **`pigsmc.particles` — `ParticleType`**
 A simple dataclass: `lambda_trans: float | None`, `lambda_rot: float | None`. Used at construction to configure per-particle kinetic scales in the engine. `lambda_trans` is defined as λ_trans = ℏτ/(2m) and `lambda_rot` is defined as λ_rot = ℏτ/(2I), where m is the particle mass, I is its moment of inertia, and τ is the imaginary time step. These values already incorporate the time step and are used directly as the Gaussian width in free-propagator exponents (denominator 4λ, not 4λτ').
@@ -141,7 +141,7 @@ Save and load logic using h5py. HDF5 layout: `/coords/positions`, `/coords/orien
 
 - **Free rotor propagator grid**: Verify that the precomputed grid converges to the analytical sum at a set of x values as L_max increases. Verify that the interpolated values are non-negative across the full domain. Verify that the grid is correctly cached and reused for identical λ_rot values.
 
-- **MIC / boundary conditions**: For each `Boundary` type, verify that `r_ij` returned by the engine is within the correct range (e.g. ‖r_ij‖_∞ ≤ L/2 for periodic dimensions). Test wrap-around at box edges. Test that free dimensions are unmodified.
+- **MIC / boundary conditions**: For each `Boundary` type, verify that `r_ij` returned by the engine is within the correct range (e.g. ‖r_ij‖_∞ ≤ L/2 for periodic dimensions). Verify that particle positions are stored in unwrapped coordinates (positions may exceed `[0, L)` and are never snapped back into the primary cell). Test that free dimensions of `r_ij` are unmodified.
 
 - **Acceptance ratio / detailed balance**: Set up a toy system (e.g. two particles with a known harmonic pair potential, primitive propagator) and verify that the ratio of forward/reverse acceptance probabilities satisfies detailed balance for a set of random moves. This tests the engine's acceptance logic without testing internal implementation.
 
