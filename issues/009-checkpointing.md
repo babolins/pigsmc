@@ -17,9 +17,9 @@ Add HDF5-based checkpoint save and load so that long-running simulations can be 
   - `/coords/orientations` — (M, N, 3) float64
   - `/rng/state` — serialized C++ RNG state (BitGenerator state stored as a byte array or structured dataset)
   - `/stats/acceptance` — per-move-type attempt and acceptance counts
-  - `/metadata` attrs: `block_count`, `sweeps_per_block`, `tau_prime`, `N`, `M`, `propagator`, `boundary`, `box_lengths`, `rng_type`, library version string
+  - `/metadata` attrs: `block_count`, `sweeps_per_block`, `tau_prime`, `N`, `M`, `propagator`, `boundary_kind` (string: `"free"`, `"periodic_3d"`, `"quasi_2d"`, or `"quasi_1d"`), `box_lengths` (float64 array of periodic-dimension lengths; absent for `"free"`), `rng_type`, library version string
 - `sim.load_checkpoint()` restores: coordinates, RNG state, block count, acceptance stats, `sweeps_per_block`
-- Validation on load: N, M, propagator type, and boundary type in the checkpoint must match the current `Simulation` configuration; mismatches raise a clear `ValueError` with a descriptive message
+- Validation on load: N, M, propagator type, and `boundary_kind` in the checkpoint must match the current `Simulation` configuration; mismatches raise a clear `ValueError` with a descriptive message
 - `h5py` added as a package dependency
 
 **QA target (manual):** run 50 blocks, save checkpoint, construct a new `Simulation` with the same configuration, load checkpoint, run 50 more blocks — verify that the final state is statistically identical to an uninterrupted 100-block run with the same seed.
@@ -31,7 +31,7 @@ Add HDF5-based checkpoint save and load so that long-running simulations can be 
 - [ ] After loading a checkpoint and running additional blocks, `sim.block_count` reflects the total (pre-checkpoint + post-load) block count
 - [ ] Loading a checkpoint into a `Simulation` with mismatched N or M raises `ValueError`
 - [ ] Loading a checkpoint into a `Simulation` with mismatched propagator type raises `ValueError`
-- [ ] The HDF5 file contains `/coords/positions`, `/coords/orientations`, `/rng/state`, `/stats/acceptance`, and `/metadata` with all required attributes
+- [ ] The HDF5 file contains `/coords/positions`, `/coords/orientations`, `/rng/state`, `/stats/acceptance`, and `/metadata` with all required attributes including `boundary_kind`
 - [ ] `sim.save_checkpoint()` is callable at any point during `run()` (i.e. from within an observable callback) without corrupting state
 - [ ] All prior tests pass
 

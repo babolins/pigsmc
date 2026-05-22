@@ -18,6 +18,7 @@ Add `compile_physics`: a runtime C++ compilation facility that lets users compil
   - `PIGSMC_REGISTER_F(name, fn)` — registers one-body trial wavefunction term
   - `PIGSMC_REGISTER_H(name, fn)` — registers pair trial wavefunction term
   - `PIGSMC_REGISTER_MOVE(name, cls)` — registers a `Move` subclass
+- The same library header exposes a `pigsmc::BoundaryDescriptor` struct and a single `pigsmc::mic_displacement(Vector3d r_i, Vector3d r_j, const BoundaryDescriptor& bd)` free function for computing MIC-corrected pair displacements in compiled C++ code. `BoundaryDescriptor` encapsulates boundary kind and box lengths; it is obtained from Python via `sim.boundary.descriptor` and passed as an argument to user-compiled functions. Because dispatch is at runtime, a compiled module is boundary-type-agnostic: switching from `Boundary.quasi_2d` to `Boundary.periodic_3d` in Python requires no C++ code change and no recompilation.
 - `compile_physics` discovers the library's installed include paths and compiled object files automatically (no manual `-I` or `-L` flags required for library headers)
 - `extra_includes` and `extra_libraries` allow users to link against third-party libraries
 - Caching: compiled modules are stored in `cache_dir` keyed by a hash of source file contents and compiler flags; subsequent calls with unchanged sources return the cached module without recompilation
@@ -35,6 +36,7 @@ Add `compile_physics`: a runtime C++ compilation facility that lets users compil
 - [ ] A second call to `compile_physics` with unchanged sources returns the cached module (no recompilation) — verified by checking that the `.so` file modification time does not change
 - [ ] A call with changed sources triggers recompilation
 - [ ] `extra_includes` allows a user header to be included in the compiled source
+- [ ] `pigsmc::mic_displacement(r_i, r_j, sim.boundary.descriptor)` is callable from user C++ code with any `Boundary` type and returns the correct MIC-corrected vector — verified by a compiled test that uses the same module with two different boundary types without recompiling
 - [ ] A simulation using compiled C++ functions produces identical results to the Python equivalent given the same seed
 - [ ] A clear error is raised if compilation fails, with the compiler error message included
 - [ ] All prior tests pass
@@ -47,3 +49,4 @@ Add `compile_physics`: a runtime C++ compilation facility that lets users compil
 
 - User story 13 (swap Python for compiled C++ without changing simulation code)
 - User story 37, 38, 39, 40, 41
+- User story 47 (C++ `mic_displacement` overloads in the library header)
