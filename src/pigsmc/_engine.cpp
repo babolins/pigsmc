@@ -15,6 +15,128 @@ using Array1d = py::array_t<double>;
 using Array1i = py::array_t<int32_t>;
 
 // ============================================================
+// PchipSpline — uniform-grid monotone cubic (Fritsch-Carlson)
+// ============================================================
+struct PchipSpline {
+    double x_lo{0}, h{1}, h_inv{1};
+    int n{0};
+    std::vector<double> y, d;
+
+    PchipSpline() = default;
+
+    PchipSpline(double x_lo_, double x_hi_, std::vector<double> y_in)
+        : x_lo(x_lo_), n(static_cast<int>(y_in.size())), y(std::move(y_in))
+    {
+        h     = (x_hi_ - x_lo_) / (n - 1);
+        h_inv = 1.0 / h;
+        d.resize(n, 0.0);
+        _build();
+    }
+
+    double eval(double x) const {
+        double t = (x - x_lo) * h_inv;
+        int k = std::max(0, std::min(n - 2, static_cast<int>(std::floor(t))));
+        double s = t - k;
+        double s2 = s * s, s3 = s2 * s;
+        return (2*s3 - 3*s2 + 1) * y[k]
+             + (s3 - 2*s2 + s)   * h * d[k]
+             + (-2*s3 + 3*s2)    * y[k+1]
+             + (s3 - s2)         * h * d[k+1];
+    }
+
+private:
+    // Fritsch-Carlson one-sided endpoint slope with monotonicity guards.
+    // m0 is the adjacent secant, m1 is the next secant inward.
+    static double _edge(double m0, double m1) {
+        double dv = (3.0 * m0 - m1) / 2.0;
+        if (!std::isfinite(dv) || dv * m0 <= 0.0) return 0.0;
+        if (m0 * m1 < 0.0 && std::abs(dv) > 3.0 * std::abs(m0)) return 3.0 * m0;
+        return dv;
+    }
+
+    void _build() {
+        if (n < 2) return;
+        std::vector<double> delta(n - 1);
+        for (int k = 0; k < n - 1; k++)
+            delta[k] = (y[k+1] - y[k]) * h_inv;
+
+        if (n == 2) { d[0] = d[1] = delta[0]; return; }
+
+        // Interior slopes: harmonic mean of adjacent secants (uniform-h simplification)
+        for (int k = 1; k < n - 1; k++) {
+            if (delta[k-1] * delta[k] <= 0.0)
+                d[k] = 0.0;
+            else
+                d[k] = 2.0 / (1.0/delta[k-1] + 1.0/delta[k]);
+        }
+        // Endpoint slopes
+        d[0]   = _edge(delta[0],   delta[1]);
+        d[n-1] = _edge(delta[n-2], delta[n-3]);
+    }
+};
+
+// ============================================================
+// FreeRotorGridC — free-rotor propagator on a precomputed grid
+//
+// log G(x) = log Σ_{l=0}^{L_max} (2l+1)/(4π) P_l(x) exp(-λ·l(l+1))
+//
+// Legendre polynomials via Bonnet recursion; log G stored as a
+// PCHIP spline for fast interpolation.
+// ============================================================
+class FreeRotorGridC {
+public:
+    FreeRotorGridC(double lambda_rot, int L_max = 100, int grid_size = 1000) {
+        const double x_lo = -1.0, x_hi = 1.0;
+        double hx = (x_hi - x_lo) / (grid_size - 1);
+
+        std::vector<double> x(grid_size);
+        for (int j = 0; j < grid_size; j++)
+            x[j] = x_lo + j * hx;
+
+        // Weights: w[l] = (2l+1)/(4π) * exp(-λ·l(l+1))
+        std::vector<double> w(L_max + 1);
+        for (int l = 0; l <= L_max; l++)
+            w[l] = (2*l + 1) / (4.0 * M_PI) * std::exp(-lambda_rot * l * (l + 1));
+
+        // Accumulate G via Bonnet recursion using two alternating buffers.
+        // buf0 = P_{l-1}, buf1 = P_l; updated in-place per grid point.
+        std::vector<double> G(grid_size, 0.0);
+        std::vector<double> buf0(grid_size, 1.0); // P_0 = 1
+        for (int j = 0; j < grid_size; j++) G[j] += w[0] * buf0[j];
+
+        if (L_max >= 1) {
+            std::vector<double> buf1(x);           // P_1 = x
+            for (int j = 0; j < grid_size; j++) G[j] += w[1] * buf1[j];
+
+            for (int l = 1; l < L_max; l++) {
+                double a = (2.0*l + 1) / (l + 1);
+                double b = static_cast<double>(l) / (l + 1);
+                for (int j = 0; j < grid_size; j++) {
+                    double Pnext = a * x[j] * buf1[j] - b * buf0[j];
+                    G[j]    += w[l+1] * Pnext;
+                    buf0[j]  = buf1[j];
+                    buf1[j]  = Pnext;
+                }
+            }
+        }
+
+        std::vector<double> log_G(grid_size);
+        for (int j = 0; j < grid_size; j++)
+            log_G[j] = std::log(std::max(G[j], 1e-300));
+
+        spline_logG_ = PchipSpline(x_lo, x_hi, std::move(log_G));
+    }
+
+    double log_eval(double x) const {
+        x = std::max(-1.0, std::min(1.0, x));
+        return spline_logG_.eval(x);
+    }
+
+private:
+    PchipSpline spline_logG_;
+};
+
+// ============================================================
 // MoveResult
 // ============================================================
 struct MoveResult {
@@ -78,7 +200,8 @@ struct PathState {
     Array1d lambda_rot;
     Array1i slice_kind;
     py::object boundary;
-    py::object log_G;   // callable(x, lambda_rot) -> float; py::none() if no rot DOF
+    // Per-particle rotational propagator grids; null when no rotational DOF.
+    const std::vector<std::shared_ptr<FreeRotorGridC>>* grids{nullptr};
 };
 
 // ============================================================
@@ -469,10 +592,16 @@ public:
     }
 };
 
-// RotationBisectionMove: Lévy bridge on the sphere.
-// Proposes new interior orientations and computes log_ratio_contrib to cancel
-// the rotational kinetic terms in compute_log_acceptance → acceptance = 1.0
-// for a free rotor (no potential).
+// RotationBisectionMove: hierarchical bisection on the sphere.
+// Proposes new interior orientations using a cone centred on the great-circle
+// midpoint of each pair of fixed endpoints. The cone half-angle is scaled to
+// match the free-rotor angular variance at each level.
+//
+// The proposal is symmetric (forward and reverse draw from the same cone for
+// fixed endpoints), so log_ratio_contrib = 0 and the engine's kinetic terms
+// enter the acceptance ratio without cancellation. Acceptance < 1 for a free
+// rotor is correct behaviour; the kinetic terms prefer proposals with higher
+// rotational weight.
 class RotationBisectionMove : public Move {
 public:
     explicit RotationBisectionMove(int level) : level_(level) {
@@ -498,22 +627,18 @@ public:
 
         // Load current orientations for the full range
         std::vector<std::array<double, 3>> work(n + 1);
-        std::vector<std::array<double, 3>> work_old(n + 1);
         for (int k = 0; k <= n; k++) {
             int m = m_start + k;
             for (int d = 0; d < 3; d++) work[k][d] = ori(m, i, d);
-            work_old[k] = work[k];
         }
 
-        // Spherical Lévy bridge: for each bisection level propose the midpoint
-        // by rotating the great-circle midpoint using the cone proposal.
-        // The step size decreases with level to match the free-rotor variance.
+        // Hierarchical bisection: coarsest to finest.
+        // At each level, propose the midpoint of each interval from a cone
+        // centred on the great-circle midpoint; cone size scales as √(λ·half_step).
         int step = n;
         for (int l = level_; l >= 1; l--) {
             int half_step = step / 2;
-            // Effective lambda for half-step links
             double sigma_angle = std::sqrt(lam_rot_i * static_cast<double>(half_step));
-            // Clamp to [0, π]
             double cone = std::min(sigma_angle * 2.0, M_PI);
 
             for (int k = 0; k + step <= n; k += step) {
@@ -526,7 +651,6 @@ public:
                 if (norm < 1e-10) {
                     // Antipodal: pick any perpendicular direction
                     build_perp(work[k].data(), mean, mean + 3);
-                    // mean now holds e1; normalize
                     norm = std::sqrt(dot3(mean, mean));
                 }
                 for (int d = 0; d < 3; d++) mean[d] /= norm;
@@ -548,21 +672,8 @@ public:
             buf(m, 0, 2) = work[k][2];
         }
 
-        // log_ratio_contrib cancels the rotational kinetic terms the engine adds.
-        // Engine adds: Σ_links [log_G(new_dot) - log_G(old_dot)]
-        // Move sets:   Σ_links [log_G(old_dot) - log_G(new_dot)]
-        double log_ratio = 0.0;
-        if (!state.log_G.is_none()) {
-            for (int k = 0; k < n; k++) {
-                double old_dot = std::max(-1.0, std::min(1.0, dot3(work_old[k].data(), work_old[k+1].data())));
-                double new_dot = std::max(-1.0, std::min(1.0, dot3(work[k].data(), work[k+1].data())));
-                double lg_old = state.log_G(py::float_(old_dot), py::float_(lam_rot_i)).cast<double>();
-                double lg_new = state.log_G(py::float_(new_dot), py::float_(lam_rot_i)).cast<double>();
-                log_ratio += lg_old - lg_new;
-            }
-        }
-
-        return MoveResult(i, m_start + 1, m_start + n - 1, log_ratio, /*has_rot=*/true);
+        // Symmetric proposal → log_ratio_contrib = 0; kinetic terms handled by engine.
+        return MoveResult(i, m_start + 1, m_start + n - 1, 0.0, /*has_rot=*/true);
     }
 
 private:
@@ -596,7 +707,7 @@ public:
            py::object rng,
            int boundary_kind, Array1d box_half,
            py::object boundary_obj,
-           py::object log_G)
+           std::vector<std::shared_ptr<FreeRotorGridC>> grids)
         : pos_(positions), ori_(orientations),
           buf_pos_(buf_pos), buf_ori_(buf_ori),
           lam_(lambda_trans), lam_rot_(lambda_rot),
@@ -606,7 +717,7 @@ public:
           f_(py::none()), h_(py::none()),
           total_w_(0.0),
           boundary_obj_(boundary_obj),
-          log_G_(log_G)
+          grids_(std::move(grids))
     {
         switch (boundary_kind) {
             case 1: mic_fn_ = do_mic_3d;     break;
@@ -666,7 +777,7 @@ public:
         ps.lambda_rot = lam_rot_;
         ps.slice_kind = sk_;
         ps.boundary = boundary_obj_;
-        ps.log_G = log_G_;
+        ps.grids = grids_.empty() ? nullptr : &grids_;
 
         int n_attempts = sweeps_per_block * N_ * M_;
 
@@ -725,7 +836,7 @@ private:
     MicFn mic_fn_{do_mic_free};
     std::array<double, 3> box_half_{0.0, 0.0, 0.0};
     py::object boundary_obj_;
-    py::object log_G_;
+    std::vector<std::shared_ptr<FreeRotorGridC>> grids_;
 
     Array3d mic_displacement(const Array3d& a, const Array3d& b) const {
         auto ra = a.unchecked<1>();
@@ -799,11 +910,10 @@ private:
         }
 
         // --- Rotational kinetic terms ---
-        if (result.has_rot && !log_G_.is_none()) {
+        if (result.has_rot && !grids_.empty()) {
             auto ori = ori_.unchecked<3>();
             auto buf = buf_ori_.unchecked<3>();
-            auto lam_rot = lam_rot_.unchecked<1>();
-            double lam_rot_i = lam_rot(i);
+            FreeRotorGridC* grid = grids_[i].get();
 
             for (int ml = link_lo; ml <= link_hi; ml++) {
                 int mr = ml + 1;
@@ -821,9 +931,7 @@ private:
                 }
                 double new_dot = std::max(-1.0, std::min(1.0, dot3(uo_l, uo_r)));
 
-                double lg_old = log_G_(py::float_(old_dot), py::float_(lam_rot_i)).cast<double>();
-                double lg_new = log_G_(py::float_(new_dot), py::float_(lam_rot_i)).cast<double>();
-                log_a += lg_new - lg_old;
+                log_a += grid->log_eval(new_dot) - grid->log_eval(old_dot);
             }
         }
 
@@ -895,6 +1003,11 @@ private:
 PYBIND11_MODULE(_engine, m) {
     m.doc() = "pigsmc C++ sweep engine";
 
+    py::class_<FreeRotorGridC, std::shared_ptr<FreeRotorGridC>>(m, "FreeRotorGridC")
+        .def(py::init<double, int, int>(),
+             py::arg("lambda_rot"), py::arg("L_max") = 100, py::arg("grid_size") = 1000)
+        .def("log_eval", &FreeRotorGridC::log_eval, py::arg("x"));
+
     py::class_<MoveResult>(m, "MoveResult")
         .def(py::init<int, int, int, double, bool>(),
              py::arg("particle"), py::arg("m_lo"), py::arg("m_hi"),
@@ -917,8 +1030,7 @@ PYBIND11_MODULE(_engine, m) {
         .def_readwrite("lambda_trans", &PathState::lambda_trans)
         .def_readwrite("lambda_rot", &PathState::lambda_rot)
         .def_readwrite("slice_kind", &PathState::slice_kind)
-        .def_readwrite("boundary", &PathState::boundary)
-        .def_readwrite("log_G", &PathState::log_G);
+        .def_readwrite("boundary", &PathState::boundary);
 
     py::class_<Move, PyMove, std::shared_ptr<Move>>(m, "Move")
         .def(py::init<>())
@@ -968,7 +1080,8 @@ PYBIND11_MODULE(_engine, m) {
         .def(py::init<Array3d, Array3d, Array3d, Array3d,
                       Array1d, Array1d, Array1i,
                       int, int, double, py::object,
-                      int, Array1d, py::object, py::object>(),
+                      int, Array1d, py::object,
+                      std::vector<std::shared_ptr<FreeRotorGridC>>>(),
              py::arg("positions"), py::arg("orientations"),
              py::arg("buf_pos"), py::arg("buf_ori"),
              py::arg("lambda_trans"), py::arg("lambda_rot"),
@@ -976,7 +1089,7 @@ PYBIND11_MODULE(_engine, m) {
              py::arg("N"), py::arg("M"), py::arg("tau_prime"),
              py::arg("rng"),
              py::arg("boundary_kind"), py::arg("box_half"),
-             py::arg("boundary_obj"), py::arg("log_G"))
+             py::arg("boundary_obj"), py::arg("grids"))
         .def("add_move", &Engine::add_move, py::arg("move"), py::arg("weight"))
         .def("set_potential", &Engine::set_potential,
              py::arg("V_ext"), py::arg("V_int"))

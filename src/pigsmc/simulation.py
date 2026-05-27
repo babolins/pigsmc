@@ -5,8 +5,7 @@ import numpy as np
 from .boundaries import Boundary
 from .moves import Move, SliceKind
 from .particles import ParticleType
-from .propagators import FreeRotorGrid
-from pigsmc._engine import Engine
+from pigsmc._engine import Engine, FreeRotorGridC
 
 
 class Simulation:
@@ -69,18 +68,15 @@ class Simulation:
         )
         self._slice_kind = np.full(M, SliceKind.PHYSICAL, dtype=np.int32)
 
-        # Precompute free-rotor propagator grid per unique lambda_rot value.
-        self._free_rotor_grids: dict[float, FreeRotorGrid] = {}
-        log_G_callable = None
+        # Build per-particle C++ rotational propagator grids (one per unique lambda_rot).
+        grids: list[FreeRotorGridC] = []
         if any(has_rot):
             unique_lam_rot = set(p.lambda_rot for p in particles if p.lambda_rot is not None)
-            for lam in unique_lam_rot:
-                self._free_rotor_grids[lam] = FreeRotorGrid(lam, L_max=L_max, grid_size=grid_size)
-
-            def _log_G(x, lambda_rot):
-                return self._free_rotor_grids[lambda_rot].log_eval(x)
-
-            log_G_callable = _log_G
+            grids_by_lam = {
+                lam: FreeRotorGridC(lam, L_max=L_max, grid_size=grid_size)
+                for lam in unique_lam_rot
+            }
+            grids = [grids_by_lam[p.lambda_rot] for p in particles]
 
         _box_half = np.asarray(boundary._box_half, dtype=np.float64)
         self._engine = Engine(
@@ -91,7 +87,7 @@ class Simulation:
             self._N, self._M, self._tau_prime,
             self._rng,
             boundary._kind, _box_half, boundary,
-            log_G_callable if log_G_callable is not None else None,
+            grids,
         )
 
         self._moves: list[Move] = []

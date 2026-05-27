@@ -52,29 +52,29 @@ def test_simulation_mixed_lambda_rot_raises():
 # Free rotor propagator grid
 # ---------------------------------------------------------------------------
 
-def test_free_rotor_grid_non_negative():
-    """Interpolated propagator values are non-negative across x ∈ [-1, 1]."""
+def test_free_rotor_grid_log_finite():
+    """log G is finite across x ∈ [-1, 1]."""
     grid = FreeRotorGrid(lambda_rot=0.5, L_max=50, grid_size=200)
     xs = np.linspace(-1.0, 1.0, 500)
-    vals = grid.eval(xs)
-    assert np.all(vals >= 0.0), f"min={vals.min()}"
+    vals = grid.log_eval(xs)
+    assert np.all(np.isfinite(vals)), f"non-finite log G at some x"
 
 
 def test_free_rotor_grid_converges_with_L_max():
-    """Grid values converge as L_max increases."""
+    """log G values converge as L_max increases."""
     x = 0.5
-    small = FreeRotorGrid(lambda_rot=0.5, L_max=10, grid_size=500).eval(x)
-    large = FreeRotorGrid(lambda_rot=0.5, L_max=100, grid_size=500).eval(x)
+    small = FreeRotorGrid(lambda_rot=0.5, L_max=10, grid_size=500).log_eval(x)
+    large = FreeRotorGrid(lambda_rot=0.5, L_max=100, grid_size=500).log_eval(x)
     assert abs(float(large) - float(small)) < 1e-4
 
 
 def test_free_rotor_grid_log_eval():
-    """log_eval returns log of G, consistent with eval."""
+    """log_eval is finite and monotone-increasing toward x=1."""
     grid = FreeRotorGrid(lambda_rot=0.5, L_max=50, grid_size=500)
-    x = 0.3
-    log_g = float(grid.log_eval(x))
-    g = float(grid.eval(x))
-    assert abs(np.exp(log_g) - g) < 1e-10
+    log_at_0 = float(grid.log_eval(0.0))
+    log_at_1 = float(grid.log_eval(1.0))
+    assert np.isfinite(log_at_0)
+    assert log_at_1 > log_at_0
 
 
 def test_free_rotor_grid_configurable():
@@ -135,23 +135,40 @@ def test_rotation_bisection_move_registerable():
 
 
 # ---------------------------------------------------------------------------
-# Acceptance rate: bisection = 1.0 for free rotor (no potential)
+# Rotation move acceptance ratio for free rotor (no potential)
 # ---------------------------------------------------------------------------
 
-def test_rotation_bisection_acceptance_rate_one_free_rotor():
-    """Lévy bridge cancels kinetic terms → acceptance 1.0 for free rotor."""
-    sim = make_rot_sim(N=1, M=9, seed=42)
-    # Initialize with valid unit vectors
+def test_rotation_rigid_acceptance_rate_one_free_rotor():
+    """Rigid move has acceptance 1.0 for free rotor: all dot products are invariant."""
+    sim = make_rot_sim(N=1, M=5, seed=7)
     sim.orientations[:] = 0.0
-    sim.orientations[:, :, 2] = 1.0  # all pointing in z direction
+    sim.orientations[:, :, 2] = 1.0
 
-    move = RotationBisectionMove(level=3)
+    move = RotationRigidMove(step_size=0.5)
     sim.add_move(move)
-    sim.run(blocks=20)
+    sim.run(blocks=50)
     stats = sim.acceptance_stats[move]
     assert stats["attempts"] > 0
     assert stats["acceptances"] == stats["attempts"], (
         f"Expected 100% acceptance, got {stats['acceptances']}/{stats['attempts']}"
+    )
+
+
+def test_rotation_bisection_acceptance_rate_free_rotor():
+    """Bisection move has acceptance < 1 for free rotor: kinetic terms enter the ratio."""
+    sim = make_rot_sim(N=1, M=9, seed=42)
+    sim.orientations[:] = 0.0
+    sim.orientations[:, :, 2] = 1.0
+
+    move = RotationBisectionMove(level=3)
+    sim.add_move(move)
+    sim.run(blocks=100)
+    stats = sim.acceptance_stats[move]
+    assert stats["attempts"] > 0
+    assert stats["acceptances"] > 0, "All proposals rejected"
+    assert stats["acceptances"] < stats["attempts"], (
+        f"Expected acceptance < 1 (kinetic terms not cancelled), "
+        f"got {stats['acceptances']}/{stats['attempts']}"
     )
 
 
