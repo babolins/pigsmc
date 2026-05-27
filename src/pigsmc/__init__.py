@@ -1,5 +1,17 @@
 from .boundaries import Boundary
-from .moves import Move, MoveResult, PathState, TranslationBisectionMove, TranslationEndMove, TranslationInteriorMove, TranslationRigidMove
+from .moves import (
+    Move,
+    MoveResult,
+    PathState,
+    RotationBisectionMove,
+    RotationEndMove,
+    RotationInteriorMove,
+    RotationRigidMove,
+    TranslationBisectionMove,
+    TranslationEndMove,
+    TranslationInteriorMove,
+    TranslationRigidMove,
+)
 from .particles import ParticleType
 from .simulation import Simulation
 
@@ -9,6 +21,10 @@ __all__ = [
     "MoveResult",
     "ParticleType",
     "PathState",
+    "RotationBisectionMove",
+    "RotationEndMove",
+    "RotationInteriorMove",
+    "RotationRigidMove",
     "Simulation",
     "TranslationBisectionMove",
     "TranslationEndMove",

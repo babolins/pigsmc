@@ -19,12 +19,14 @@ using Array1i = py::array_t<int32_t>;
 // ============================================================
 struct MoveResult {
     int particle{0};
-    int m_lo{0}, m_hi{0};  // inclusive range of changed slices
+    int m_lo{0}, m_hi{0};
     double log_ratio_contrib{0.0};
+    bool has_rot{false};  // true if this move updates orientations
 
     MoveResult() = default;
-    MoveResult(int particle, int m_lo, int m_hi, double lrc)
-        : particle(particle), m_lo(m_lo), m_hi(m_hi), log_ratio_contrib(lrc) {}
+    MoveResult(int particle, int m_lo, int m_hi, double lrc, bool has_rot = false)
+        : particle(particle), m_lo(m_lo), m_hi(m_hi),
+          log_ratio_contrib(lrc), has_rot(has_rot) {}
 };
 
 // ============================================================
@@ -73,8 +75,10 @@ struct PathState {
     int N{0}, M{0};
     double tau_prime{0.0};
     Array1d lambda_trans;
+    Array1d lambda_rot;
     Array1i slice_kind;
     py::object boundary;
+    py::object log_G;   // callable(x, lambda_rot) -> float; py::none() if no rot DOF
 };
 
 // ============================================================
@@ -106,9 +110,63 @@ static Array3d row_view(Array3d& arr, int m, int i) {
                    reinterpret_cast<double*>(ptr), arr);
 }
 
+static double dot3(const double* a, const double* b) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+static void normalize3(double* u) {
+    double n = std::sqrt(u[0]*u[0] + u[1]*u[1] + u[2]*u[2]);
+    if (n > 1e-15) { u[0] /= n; u[1] /= n; u[2] /= n; }
+}
+
+// Build two unit vectors e1, e2 perpendicular to u (u must be unit vector).
+static void build_perp(const double u[3], double e1[3], double e2[3]) {
+    double t[3] = {1.0, 0.0, 0.0};
+    if (std::abs(u[0]) > 0.9) { t[0] = 0.0; t[1] = 1.0; t[2] = 0.0; }
+    double dot = dot3(t, u);
+    for (int d = 0; d < 3; d++) e1[d] = t[d] - dot * u[d];
+    normalize3(e1);
+    // e2 = u × e1
+    e2[0] = u[1]*e1[2] - u[2]*e1[1];
+    e2[1] = u[2]*e1[0] - u[0]*e1[2];
+    e2[2] = u[0]*e1[1] - u[1]*e1[0];
+}
+
+// Sample a unit vector u_new uniformly within a cone of half-angle step_size
+// centred on u (which must be a unit vector).
+static void propose_in_cone(double u_new[3], const double u[3],
+                             double step_size, py::object rng) {
+    double e1[3], e2[3];
+    build_perp(u, e1, e2);
+
+    double cos_max = std::cos(step_size);
+    double cos_theta = rng.attr("uniform")(py::float_(cos_max), py::float_(1.0)).cast<double>();
+    double phi = rng.attr("uniform")(py::float_(0.0), py::float_(2.0 * M_PI)).cast<double>();
+    double sin_theta = std::sqrt(std::max(0.0, 1.0 - cos_theta * cos_theta));
+
+    for (int d = 0; d < 3; d++)
+        u_new[d] = cos_theta * u[d]
+                 + sin_theta * std::cos(phi) * e1[d]
+                 + sin_theta * std::sin(phi) * e2[d];
+}
+
+// Apply Rodrigues rotation: rotate vector v by angle theta around unit axis ax.
+static void rodrigues(double out[3], const double v[3],
+                      const double ax[3], double theta) {
+    double ct = std::cos(theta), st = std::sin(theta);
+    double dot = dot3(ax, v);
+    // cross = ax × v
+    double cx = ax[1]*v[2] - ax[2]*v[1];
+    double cy = ax[2]*v[0] - ax[0]*v[2];
+    double cz = ax[0]*v[1] - ax[1]*v[0];
+    out[0] = ct * v[0] + st * cx + (1.0 - ct) * dot * ax[0];
+    out[1] = ct * v[1] + st * cy + (1.0 - ct) * dot * ax[1];
+    out[2] = ct * v[2] + st * cz + (1.0 - ct) * dot * ax[2];
+}
+
 
 // ============================================================
-// C++ move implementations
+// C++ move implementations — translational
 // ============================================================
 class TranslationEndMove : public Move {
 public:
@@ -295,6 +353,231 @@ public:
     }
 };
 
+
+// ============================================================
+// C++ move implementations — rotational
+// ============================================================
+
+class RotationEndMove : public Move {
+public:
+    explicit RotationEndMove(double step_size) : step_size_(step_size) {}
+
+    MoveResult propose(PathState& state, py::object rng) override {
+        int i = rng.attr("integers")(0, state.N).cast<int>();
+        int which = rng.attr("integers")(0, 2).cast<int>();
+        int m = (which == 0) ? 0 : state.M - 1;
+
+        auto ori = state.orientations.unchecked<3>();
+        auto buf = state.buffer_orientations.mutable_unchecked<3>();
+
+        double u[3] = {ori(m, i, 0), ori(m, i, 1), ori(m, i, 2)};
+        double u_new[3];
+        propose_in_cone(u_new, u, step_size_, rng);
+
+        buf(m, 0, 0) = u_new[0];
+        buf(m, 0, 1) = u_new[1];
+        buf(m, 0, 2) = u_new[2];
+
+        return MoveResult(i, m, m, 0.0, /*has_rot=*/true);
+    }
+
+private:
+    double step_size_;
+};
+
+class PyRotationEndMove : public RotationEndMove {
+public:
+    using RotationEndMove::RotationEndMove;
+    MoveResult propose(PathState& state, py::object rng) override {
+        PYBIND11_OVERRIDE(MoveResult, RotationEndMove, propose, state, rng);
+    }
+};
+
+class RotationInteriorMove : public Move {
+public:
+    explicit RotationInteriorMove(double step_size) : step_size_(step_size) {}
+
+    MoveResult propose(PathState& state, py::object rng) override {
+        int i = rng.attr("integers")(0, state.N).cast<int>();
+        int m = rng.attr("integers")(1, state.M - 1).cast<int>();
+
+        auto ori = state.orientations.unchecked<3>();
+        auto buf = state.buffer_orientations.mutable_unchecked<3>();
+
+        double u[3] = {ori(m, i, 0), ori(m, i, 1), ori(m, i, 2)};
+        double u_new[3];
+        propose_in_cone(u_new, u, step_size_, rng);
+
+        buf(m, 0, 0) = u_new[0];
+        buf(m, 0, 1) = u_new[1];
+        buf(m, 0, 2) = u_new[2];
+
+        return MoveResult(i, m, m, 0.0, /*has_rot=*/true);
+    }
+
+private:
+    double step_size_;
+};
+
+class PyRotationInteriorMove : public RotationInteriorMove {
+public:
+    using RotationInteriorMove::RotationInteriorMove;
+    MoveResult propose(PathState& state, py::object rng) override {
+        PYBIND11_OVERRIDE(MoveResult, RotationInteriorMove, propose, state, rng);
+    }
+};
+
+class RotationRigidMove : public Move {
+public:
+    explicit RotationRigidMove(double step_size) : step_size_(step_size) {}
+
+    MoveResult propose(PathState& state, py::object rng) override {
+        int i = rng.attr("integers")(0, state.N).cast<int>();
+
+        // Random rotation axis (uniform on sphere) and angle
+        auto ax_arr = rng.attr("standard_normal")(3).cast<Array3d>().unchecked<1>();
+        double ax[3] = {ax_arr(0), ax_arr(1), ax_arr(2)};
+        normalize3(ax);
+        double theta = rng.attr("uniform")(
+            py::float_(-step_size_), py::float_(step_size_)).cast<double>();
+
+        auto ori = state.orientations.unchecked<3>();
+        auto buf = state.buffer_orientations.mutable_unchecked<3>();
+
+        for (int m = 0; m < state.M; m++) {
+            double v[3] = {ori(m, i, 0), ori(m, i, 1), ori(m, i, 2)};
+            double v_new[3];
+            rodrigues(v_new, v, ax, theta);
+            normalize3(v_new);
+            buf(m, 0, 0) = v_new[0];
+            buf(m, 0, 1) = v_new[1];
+            buf(m, 0, 2) = v_new[2];
+        }
+
+        return MoveResult(i, 0, state.M - 1, 0.0, /*has_rot=*/true);
+    }
+
+private:
+    double step_size_;
+};
+
+class PyRotationRigidMove : public RotationRigidMove {
+public:
+    using RotationRigidMove::RotationRigidMove;
+    MoveResult propose(PathState& state, py::object rng) override {
+        PYBIND11_OVERRIDE(MoveResult, RotationRigidMove, propose, state, rng);
+    }
+};
+
+// RotationBisectionMove: Lévy bridge on the sphere.
+// Proposes new interior orientations and computes log_ratio_contrib to cancel
+// the rotational kinetic terms in compute_log_acceptance → acceptance = 1.0
+// for a free rotor (no potential).
+class RotationBisectionMove : public Move {
+public:
+    explicit RotationBisectionMove(int level) : level_(level) {
+        if (level < 1)
+            throw std::invalid_argument("RotationBisectionMove: level must be >= 1");
+    }
+
+    MoveResult propose(PathState& state, py::object rng) override {
+        int n = 1 << level_;
+        if (n > state.M - 1)
+            throw std::runtime_error(
+                "RotationBisectionMove: 2^level (" + std::to_string(n) +
+                ") > M-1 (" + std::to_string(state.M - 1) + "), level too large");
+
+        int i = rng.attr("integers")(0, state.N).cast<int>();
+        int max_start = state.M - 1 - n;
+        int m_start = rng.attr("integers")(0, max_start + 1).cast<int>();
+
+        auto ori = state.orientations.unchecked<3>();
+        auto buf = state.buffer_orientations.mutable_unchecked<3>();
+        auto lam_rot = state.lambda_rot.unchecked<1>();
+        double lam_rot_i = lam_rot(i);
+
+        // Load current orientations for the full range
+        std::vector<std::array<double, 3>> work(n + 1);
+        std::vector<std::array<double, 3>> work_old(n + 1);
+        for (int k = 0; k <= n; k++) {
+            int m = m_start + k;
+            for (int d = 0; d < 3; d++) work[k][d] = ori(m, i, d);
+            work_old[k] = work[k];
+        }
+
+        // Spherical Lévy bridge: for each bisection level propose the midpoint
+        // by rotating the great-circle midpoint using the cone proposal.
+        // The step size decreases with level to match the free-rotor variance.
+        int step = n;
+        for (int l = level_; l >= 1; l--) {
+            int half_step = step / 2;
+            // Effective lambda for half-step links
+            double sigma_angle = std::sqrt(lam_rot_i * static_cast<double>(half_step));
+            // Clamp to [0, π]
+            double cone = std::min(sigma_angle * 2.0, M_PI);
+
+            for (int k = 0; k + step <= n; k += step) {
+                int mid_k = k + half_step;
+                // Great-circle midpoint between work[k] and work[k+step]
+                double mean[3];
+                for (int d = 0; d < 3; d++)
+                    mean[d] = work[k][d] + work[k + step][d];
+                double norm = std::sqrt(dot3(mean, mean));
+                if (norm < 1e-10) {
+                    // Antipodal: pick any perpendicular direction
+                    build_perp(work[k].data(), mean, mean + 3);
+                    // mean now holds e1; normalize
+                    norm = std::sqrt(dot3(mean, mean));
+                }
+                for (int d = 0; d < 3; d++) mean[d] /= norm;
+
+                double u_new[3];
+                propose_in_cone(u_new, mean, cone, rng);
+                work[mid_k][0] = u_new[0];
+                work[mid_k][1] = u_new[1];
+                work[mid_k][2] = u_new[2];
+            }
+            step = half_step;
+        }
+
+        // Write interior slices to buffer
+        for (int k = 1; k < n; k++) {
+            int m = m_start + k;
+            buf(m, 0, 0) = work[k][0];
+            buf(m, 0, 1) = work[k][1];
+            buf(m, 0, 2) = work[k][2];
+        }
+
+        // log_ratio_contrib cancels the rotational kinetic terms the engine adds.
+        // Engine adds: Σ_links [log_G(new_dot) - log_G(old_dot)]
+        // Move sets:   Σ_links [log_G(old_dot) - log_G(new_dot)]
+        double log_ratio = 0.0;
+        if (!state.log_G.is_none()) {
+            for (int k = 0; k < n; k++) {
+                double old_dot = std::max(-1.0, std::min(1.0, dot3(work_old[k].data(), work_old[k+1].data())));
+                double new_dot = std::max(-1.0, std::min(1.0, dot3(work[k].data(), work[k+1].data())));
+                double lg_old = state.log_G(py::float_(old_dot), py::float_(lam_rot_i)).cast<double>();
+                double lg_new = state.log_G(py::float_(new_dot), py::float_(lam_rot_i)).cast<double>();
+                log_ratio += lg_old - lg_new;
+            }
+        }
+
+        return MoveResult(i, m_start + 1, m_start + n - 1, log_ratio, /*has_rot=*/true);
+    }
+
+private:
+    int level_;
+};
+
+class PyRotationBisectionMove : public RotationBisectionMove {
+public:
+    using RotationBisectionMove::RotationBisectionMove;
+    MoveResult propose(PathState& state, py::object rng) override {
+        PYBIND11_OVERRIDE(MoveResult, RotationBisectionMove, propose, state, rng);
+    }
+};
+
+
 // ============================================================
 // Engine: owns the sweep loop
 // ============================================================
@@ -307,19 +590,23 @@ class Engine {
 public:
     Engine(Array3d positions, Array3d orientations,
            Array3d buf_pos, Array3d buf_ori,
-           Array1d lambda_trans, Array1i slice_kind,
+           Array1d lambda_trans, Array1d lambda_rot,
+           Array1i slice_kind,
            int N, int M, double tau_prime,
            py::object rng,
            int boundary_kind, Array1d box_half,
-           py::object boundary_obj)
+           py::object boundary_obj,
+           py::object log_G)
         : pos_(positions), ori_(orientations),
           buf_pos_(buf_pos), buf_ori_(buf_ori),
-          lam_(lambda_trans), sk_(slice_kind),
+          lam_(lambda_trans), lam_rot_(lambda_rot),
+          sk_(slice_kind),
           N_(N), M_(M), tau_(tau_prime), rng_(rng),
           V_ext_(py::none()), V_int_(py::none()),
           f_(py::none()), h_(py::none()),
           total_w_(0.0),
-          boundary_obj_(boundary_obj)
+          boundary_obj_(boundary_obj),
+          log_G_(log_G)
     {
         switch (boundary_kind) {
             case 1: mic_fn_ = do_mic_3d;     break;
@@ -376,8 +663,10 @@ public:
         ps.M = M_;
         ps.tau_prime = tau_;
         ps.lambda_trans = lam_;
+        ps.lambda_rot = lam_rot_;
         ps.slice_kind = sk_;
         ps.boundary = boundary_obj_;
+        ps.log_G = log_G_;
 
         int n_attempts = sweeps_per_block * N_ * M_;
 
@@ -423,7 +712,7 @@ public:
 
 private:
     Array3d pos_, ori_, buf_pos_, buf_ori_;
-    Array1d lam_;
+    Array1d lam_, lam_rot_;
     Array1i sk_;
     int N_, M_;
     double tau_;
@@ -436,6 +725,7 @@ private:
     MicFn mic_fn_{do_mic_free};
     std::array<double, 3> box_half_{0.0, 0.0, 0.0};
     py::object boundary_obj_;
+    py::object log_G_;
 
     Array3d mic_displacement(const Array3d& a, const Array3d& b) const {
         auto ra = a.unchecked<1>();
@@ -453,48 +743,88 @@ private:
     }
 
     void apply_move(const MoveResult& result) {
-        auto pos = pos_.mutable_unchecked<3>();
-        auto buf = buf_pos_.unchecked<3>();
         int i = result.particle;
-        for (int m = result.m_lo; m <= result.m_hi; m++) {
-            pos(m, i, 0) = buf(m, 0, 0);
-            pos(m, i, 1) = buf(m, 0, 1);
-            pos(m, i, 2) = buf(m, 0, 2);
+        // Apply positional update
+        if (!result.has_rot) {
+            auto pos = pos_.mutable_unchecked<3>();
+            auto buf = buf_pos_.unchecked<3>();
+            for (int m = result.m_lo; m <= result.m_hi; m++) {
+                pos(m, i, 0) = buf(m, 0, 0);
+                pos(m, i, 1) = buf(m, 0, 1);
+                pos(m, i, 2) = buf(m, 0, 2);
+            }
+        }
+        // Apply orientational update
+        if (result.has_rot) {
+            auto ori = ori_.mutable_unchecked<3>();
+            auto buf = buf_ori_.unchecked<3>();
+            for (int m = result.m_lo; m <= result.m_hi; m++) {
+                ori(m, i, 0) = buf(m, 0, 0);
+                ori(m, i, 1) = buf(m, 0, 1);
+                ori(m, i, 2) = buf(m, 0, 2);
+            }
         }
     }
 
     double compute_log_acceptance(const MoveResult& result) {
         double log_a = result.log_ratio_contrib;
 
-        auto pos = pos_.unchecked<3>();
-        auto buf = buf_pos_.unchecked<3>();
-        auto lam = lam_.unchecked<1>();
-
         int i    = result.particle;
         int m_lo = result.m_lo;
         int m_hi = result.m_hi;
-        double lam_i = lam(i);
 
-        // --- Kinetic terms ---
-        // Each link ml--(ml+1) is visited exactly once.  Links touching the
-        // changed range run from max(0, m_lo-1) to min(M_-2, m_hi).
-        // Old positions always come from pos; new positions come from buf
-        // for endpoints inside [m_lo, m_hi] and from pos for boundary
-        // neighbors outside the changed range.
         int link_lo = std::max(0,      m_lo - 1);
         int link_hi = std::min(M_ - 2, m_hi);
-        for (int ml = link_lo; ml <= link_hi; ml++) {
-            int mr = ml + 1;
-            double d_old = 0.0, d_new = 0.0;
-            for (int d = 0; d < 3; d++) {
-                double diff_old = pos(ml, i, d) - pos(mr, i, d);
-                d_old += diff_old * diff_old;
-                double rn_l = (ml >= m_lo) ? buf(ml, 0, d) : pos(ml, i, d);
-                double rn_r = (mr <= m_hi) ? buf(mr, 0, d) : pos(mr, i, d);
-                double diff_new = rn_l - rn_r;
-                d_new += diff_new * diff_new;
+
+        // --- Translational kinetic terms ---
+        if (!result.has_rot) {
+            auto pos = pos_.unchecked<3>();
+            auto buf = buf_pos_.unchecked<3>();
+            auto lam = lam_.unchecked<1>();
+            double lam_i = lam(i);
+
+            for (int ml = link_lo; ml <= link_hi; ml++) {
+                int mr = ml + 1;
+                double d_old = 0.0, d_new = 0.0;
+                for (int d = 0; d < 3; d++) {
+                    double diff_old = pos(ml, i, d) - pos(mr, i, d);
+                    d_old += diff_old * diff_old;
+                    double rn_l = (ml >= m_lo) ? buf(ml, 0, d) : pos(ml, i, d);
+                    double rn_r = (mr <= m_hi) ? buf(mr, 0, d) : pos(mr, i, d);
+                    double diff_new = rn_l - rn_r;
+                    d_new += diff_new * diff_new;
+                }
+                log_a += (d_old - d_new) / (4.0 * lam_i);
             }
-            log_a += (d_old - d_new) / (4.0 * lam_i);
+        }
+
+        // --- Rotational kinetic terms ---
+        if (result.has_rot && !log_G_.is_none()) {
+            auto ori = ori_.unchecked<3>();
+            auto buf = buf_ori_.unchecked<3>();
+            auto lam_rot = lam_rot_.unchecked<1>();
+            double lam_rot_i = lam_rot(i);
+
+            for (int ml = link_lo; ml <= link_hi; ml++) {
+                int mr = ml + 1;
+                // Old dot product
+                double old_dot = 0.0;
+                for (int d = 0; d < 3; d++)
+                    old_dot += ori(ml, i, d) * ori(mr, i, d);
+                old_dot = std::max(-1.0, std::min(1.0, old_dot));
+
+                // New dot product: use buffer for slices in [m_lo, m_hi]
+                double uo_l[3], uo_r[3];
+                for (int d = 0; d < 3; d++) {
+                    uo_l[d] = (ml >= m_lo) ? buf(ml, 0, d) : ori(ml, i, d);
+                    uo_r[d] = (mr <= m_hi) ? buf(mr, 0, d) : ori(mr, i, d);
+                }
+                double new_dot = std::max(-1.0, std::min(1.0, dot3(uo_l, uo_r)));
+
+                double lg_old = log_G_(py::float_(old_dot), py::float_(lam_rot_i)).cast<double>();
+                double lg_new = log_G_(py::float_(new_dot), py::float_(lam_rot_i)).cast<double>();
+                log_a += lg_new - lg_old;
+            }
         }
 
         // --- Potential and trial-wavefunction terms (per bead) ---
@@ -502,13 +832,17 @@ private:
             if (!V_ext_.is_none() || !V_int_.is_none()) {
                 double factor = (m == 0 || m == M_ - 1) ? 0.5 : 1.0;
                 auto r_old = row_view(pos_, m, i);
-                auto r_new = row_view(buf_pos_, m, 0);
-                auto u_i   = row_view(ori_, m, i);
+                auto u_i_old = row_view(ori_, m, i);
+
+                // For rotational moves, use the old position; for translational, use buffer
+                Array3d r_new = result.has_rot ? r_old : row_view(buf_pos_, m, 0);
+                // For rotational moves, use buffer orientation; for translational, use old
+                Array3d u_i_new = result.has_rot ? row_view(buf_ori_, m, 0) : u_i_old;
 
                 double V_old = 0.0, V_new = 0.0;
                 if (!V_ext_.is_none()) {
-                    V_old += V_ext_(r_old, u_i).cast<double>();
-                    V_new += V_ext_(r_new, u_i).cast<double>();
+                    V_old += V_ext_(r_old, u_i_old).cast<double>();
+                    V_new += V_ext_(r_new, u_i_new).cast<double>();
                 }
                 if (!V_int_.is_none()) {
                     for (int j = 0; j < N_; j++) {
@@ -517,8 +851,8 @@ private:
                         auto u_j   = row_view(ori_, m, j);
                         auto rij_o = mic_displacement(r_old, r_j);
                         auto rij_n = mic_displacement(r_new, r_j);
-                        V_old += V_int_(rij_o, u_i, u_j).cast<double>();
-                        V_new += V_int_(rij_n, u_i, u_j).cast<double>();
+                        V_old += V_int_(rij_o, u_i_old, u_j).cast<double>();
+                        V_new += V_int_(rij_n, u_i_new, u_j).cast<double>();
                     }
                 }
                 log_a -= tau_ * factor * (V_new - V_old);
@@ -527,13 +861,14 @@ private:
             // Trial wavefunction (endpoint slices only)
             if ((m == 0 || m == M_ - 1) && (!f_.is_none() || !h_.is_none())) {
                 auto r_old = row_view(pos_, m, i);
-                auto r_new = row_view(buf_pos_, m, 0);
-                auto u_i   = row_view(ori_, m, i);
+                auto u_i_old = row_view(ori_, m, i);
+                Array3d r_new = result.has_rot ? r_old : row_view(buf_pos_, m, 0);
+                Array3d u_i_new = result.has_rot ? row_view(buf_ori_, m, 0) : u_i_old;
 
                 double psi_old = 0.0, psi_new = 0.0;
                 if (!f_.is_none()) {
-                    psi_old += f_(r_old, u_i).cast<double>();
-                    psi_new += f_(r_new, u_i).cast<double>();
+                    psi_old += f_(r_old, u_i_old).cast<double>();
+                    psi_new += f_(r_new, u_i_new).cast<double>();
                 }
                 if (!h_.is_none()) {
                     for (int j = 0; j < N_; j++) {
@@ -542,8 +877,8 @@ private:
                         auto u_j   = row_view(ori_, m, j);
                         auto rij_o = mic_displacement(r_old, r_j);
                         auto rij_n = mic_displacement(r_new, r_j);
-                        psi_old += h_(rij_o, u_i, u_j).cast<double>();
-                        psi_new += h_(rij_n, u_i, u_j).cast<double>();
+                        psi_old += h_(rij_o, u_i_old, u_j).cast<double>();
+                        psi_new += h_(rij_n, u_i_new, u_j).cast<double>();
                     }
                 }
                 log_a += psi_new - psi_old;
@@ -561,13 +896,14 @@ PYBIND11_MODULE(_engine, m) {
     m.doc() = "pigsmc C++ sweep engine";
 
     py::class_<MoveResult>(m, "MoveResult")
-        .def(py::init<int, int, int, double>(),
+        .def(py::init<int, int, int, double, bool>(),
              py::arg("particle"), py::arg("m_lo"), py::arg("m_hi"),
-             py::arg("log_ratio_contrib"))
+             py::arg("log_ratio_contrib"), py::arg("has_rot") = false)
         .def_readwrite("particle", &MoveResult::particle)
         .def_readwrite("m_lo", &MoveResult::m_lo)
         .def_readwrite("m_hi", &MoveResult::m_hi)
-        .def_readwrite("log_ratio_contrib", &MoveResult::log_ratio_contrib);
+        .def_readwrite("log_ratio_contrib", &MoveResult::log_ratio_contrib)
+        .def_readwrite("has_rot", &MoveResult::has_rot);
 
     py::class_<PathState>(m, "PathState")
         .def(py::init<>())
@@ -579,8 +915,10 @@ PYBIND11_MODULE(_engine, m) {
         .def_readwrite("M", &PathState::M)
         .def_readwrite("tau_prime", &PathState::tau_prime)
         .def_readwrite("lambda_trans", &PathState::lambda_trans)
+        .def_readwrite("lambda_rot", &PathState::lambda_rot)
         .def_readwrite("slice_kind", &PathState::slice_kind)
-        .def_readwrite("boundary", &PathState::boundary);
+        .def_readwrite("boundary", &PathState::boundary)
+        .def_readwrite("log_G", &PathState::log_G);
 
     py::class_<Move, PyMove, std::shared_ptr<Move>>(m, "Move")
         .def(py::init<>())
@@ -606,18 +944,39 @@ PYBIND11_MODULE(_engine, m) {
         .def(py::init<int>(), py::arg("level"))
         .def("propose", &TranslationBisectionMove::propose);
 
+    py::class_<RotationEndMove, Move, PyRotationEndMove,
+               std::shared_ptr<RotationEndMove>>(m, "RotationEndMove")
+        .def(py::init<double>(), py::arg("step_size"))
+        .def("propose", &RotationEndMove::propose);
+
+    py::class_<RotationInteriorMove, Move, PyRotationInteriorMove,
+               std::shared_ptr<RotationInteriorMove>>(m, "RotationInteriorMove")
+        .def(py::init<double>(), py::arg("step_size"))
+        .def("propose", &RotationInteriorMove::propose);
+
+    py::class_<RotationRigidMove, Move, PyRotationRigidMove,
+               std::shared_ptr<RotationRigidMove>>(m, "RotationRigidMove")
+        .def(py::init<double>(), py::arg("step_size"))
+        .def("propose", &RotationRigidMove::propose);
+
+    py::class_<RotationBisectionMove, Move, PyRotationBisectionMove,
+               std::shared_ptr<RotationBisectionMove>>(m, "RotationBisectionMove")
+        .def(py::init<int>(), py::arg("level"))
+        .def("propose", &RotationBisectionMove::propose);
+
     py::class_<Engine>(m, "Engine")
         .def(py::init<Array3d, Array3d, Array3d, Array3d,
-                      Array1d, Array1i,
+                      Array1d, Array1d, Array1i,
                       int, int, double, py::object,
-                      int, Array1d, py::object>(),
+                      int, Array1d, py::object, py::object>(),
              py::arg("positions"), py::arg("orientations"),
              py::arg("buf_pos"), py::arg("buf_ori"),
-             py::arg("lambda_trans"), py::arg("slice_kind"),
+             py::arg("lambda_trans"), py::arg("lambda_rot"),
+             py::arg("slice_kind"),
              py::arg("N"), py::arg("M"), py::arg("tau_prime"),
              py::arg("rng"),
              py::arg("boundary_kind"), py::arg("box_half"),
-             py::arg("boundary_obj"))
+             py::arg("boundary_obj"), py::arg("log_G"))
         .def("add_move", &Engine::add_move, py::arg("move"), py::arg("weight"))
         .def("set_potential", &Engine::set_potential,
              py::arg("V_ext"), py::arg("V_int"))

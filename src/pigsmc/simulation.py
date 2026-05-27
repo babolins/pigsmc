@@ -5,6 +5,7 @@ import numpy as np
 from .boundaries import Boundary
 from .moves import Move, SliceKind
 from .particles import ParticleType
+from .propagators import FreeRotorGrid
 from pigsmc._engine import Engine
 
 
@@ -19,6 +20,8 @@ class Simulation:
         rng: str = "mt19937_64",
         seed: int = 0,
         sweeps_per_block: int = 1,
+        L_max: int = 100,
+        grid_size: int = 1000,
     ):
         if boundary is None:
             boundary = Boundary.free()
@@ -32,6 +35,12 @@ class Simulation:
                 raise ValueError(
                     "All particles must have lambda_trans set; got lambda_trans=None"
                 )
+        has_rot = [p.lambda_rot is not None for p in particles]
+        if any(has_rot) and not all(has_rot):
+            raise ValueError(
+                "All particles must have lambda_rot set if any do; mixed "
+                "translational+rotational particles are not supported"
+            )
 
         self._particles = particles
         self._N = len(particles)
@@ -54,16 +63,35 @@ class Simulation:
         self._lambda_trans = np.array(
             [p.lambda_trans for p in particles], dtype=np.float64
         )
+        self._lambda_rot = np.array(
+            [p.lambda_rot if p.lambda_rot is not None else 0.0 for p in particles],
+            dtype=np.float64,
+        )
         self._slice_kind = np.full(M, SliceKind.PHYSICAL, dtype=np.int32)
+
+        # Precompute free-rotor propagator grid per unique lambda_rot value.
+        self._free_rotor_grids: dict[float, FreeRotorGrid] = {}
+        log_G_callable = None
+        if any(has_rot):
+            unique_lam_rot = set(p.lambda_rot for p in particles if p.lambda_rot is not None)
+            for lam in unique_lam_rot:
+                self._free_rotor_grids[lam] = FreeRotorGrid(lam, L_max=L_max, grid_size=grid_size)
+
+            def _log_G(x, lambda_rot):
+                return self._free_rotor_grids[lambda_rot].log_eval(x)
+
+            log_G_callable = _log_G
 
         _box_half = np.asarray(boundary._box_half, dtype=np.float64)
         self._engine = Engine(
             self.positions, self.orientations,
             self._buf_pos, self._buf_ori,
-            self._lambda_trans, self._slice_kind,
+            self._lambda_trans, self._lambda_rot,
+            self._slice_kind,
             self._N, self._M, self._tau_prime,
             self._rng,
             boundary._kind, _box_half, boundary,
+            log_G_callable if log_G_callable is not None else None,
         )
 
         self._moves: list[Move] = []
